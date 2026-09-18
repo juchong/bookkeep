@@ -184,6 +184,38 @@ class TestSearch:
         # But results should be deduplicated by URL
         assert len(results) == 1
 
+    def test_search_deduplicates_same_release_from_different_urls(
+        self, mock_prowlarr_source
+    ):
+        mock_prowlarr_source.client.search_with_retry.return_value = [
+            {
+                "title": "Dungeon Crawler Carl by Matt Dinniman [M4B]",
+                "downloadUrl": "http://download/1",
+                "size": 774373376,
+                "protocol": "torrent",
+                "indexer": "TestIndexer",
+                "categories": [{"id": 3030, "name": "Audio/Audiobook"}],
+            },
+            {
+                "title": "Dungeon Crawler Carl by Matt Dinniman [M4B]",
+                "downloadUrl": "http://download/2",
+                "size": 774373376,
+                "protocol": "torrent",
+                "indexer": "TestIndexer",
+                "categories": [{"id": 3030, "name": "Audio/Audiobook"}],
+            },
+        ]
+
+        results = mock_prowlarr_source.search(
+            title="Dungeon Crawler Carl",
+            author="Matt Dinniman",
+            format_type="audiobook",
+            series="Dungeon Crawler Carl",
+            series_position=1,
+        )
+
+        assert len(results) == 1
+
     def test_search_tries_multiple_queries_if_needed(self, mock_prowlarr_source):
         # First query returns nothing, second query returns results
         mock_prowlarr_source.client.search_with_retry.side_effect = [
@@ -731,3 +763,71 @@ class TestTitleMatches:
         # Only the correct title should survive
         assert len(results) == 1
         assert "Stephen King - It" in results[0].title
+
+
+class TestSeriesPositionMatches:
+    """Test filtering of releases that name a conflicting series volume."""
+
+    @pytest.mark.parametrize(
+        ("release_title", "position", "expected"),
+        [
+            ("Dungeon Crawler Carl by Matt Dinniman [M4B]", 1, True),
+            ("Dungeon Crawler Carl, Book 1 by Matt Dinniman [M4B]", 1, True),
+            ("This Inevitable Ruin: Dungeon Crawler Carl, Book 7", 1, False),
+            ("Dungeon Crawler Carl 03 - The Dungeon Anarchist's Cookbook", 1, False),
+            ("Dungeon Crawler Carl Series 1 - 6 by Matt Dinniman", 1, False),
+            ("Dungeon Crawler Carl: Audio Immersion Tunnel Season 3", 1, False),
+            ("This Inevitable Ruin: Dungeon Crawler Carl, Book 7", 7, True),
+        ],
+    )
+    def test_explicit_series_markers(
+        self, mock_prowlarr_source, release_title, position, expected
+    ):
+        assert mock_prowlarr_source._series_position_matches(
+            release_title,
+            "Dungeon Crawler Carl" if position == 1 else "This Inevitable Ruin",
+            "Dungeon Crawler Carl",
+            position,
+        ) is expected
+
+    def test_search_filters_conflicting_series_positions(
+        self, mock_prowlarr_source
+    ):
+        def result(title, url):
+            return {
+                "title": title,
+                "downloadUrl": url,
+                "size": 774373376,
+                "protocol": "torrent",
+                "indexer": "TestIndexer",
+                "categories": [{"id": 3030, "name": "Audio/Audiobook"}],
+            }
+
+        mock_prowlarr_source.client.search_with_retry.return_value = [
+            result(
+                "Dungeon Crawler Carl by Matt Dinniman [M4B]",
+                "http://download/book-1",
+            ),
+            result(
+                "This Inevitable Ruin Dungeon Crawler Carl, Book 7 "
+                "by Matt Dinniman [M4B]",
+                "http://download/book-7",
+            ),
+            result(
+                "Dungeon Crawler Carl: Audio Immersion Tunnel Season 3 "
+                "by Matt Dinniman [M4B]",
+                "http://download/season-3",
+            ),
+        ]
+
+        results = mock_prowlarr_source.search(
+            title="Dungeon Crawler Carl",
+            author="Matt Dinniman",
+            format_type="audiobook",
+            series="Dungeon Crawler Carl",
+            series_position=1,
+        )
+
+        assert [release.title for release in results] == [
+            "Dungeon Crawler Carl by Matt Dinniman [M4B]"
+        ]

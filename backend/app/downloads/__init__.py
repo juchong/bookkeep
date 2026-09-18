@@ -132,7 +132,9 @@ class ReleaseSource(ABC):
         title: str,
         author: Optional[str] = None,
         isbn: Optional[str] = None,
-        format_type: str = "ebook"  # "ebook" or "audiobook"
+        format_type: str = "ebook",  # "ebook" or "audiobook"
+        series: Optional[str] = None,
+        series_position: Optional[float] = None,
     ) -> List[Release]:
         """
         Search for releases matching book metadata.
@@ -142,6 +144,8 @@ class ReleaseSource(ABC):
             author: Book author (optional)
             isbn: ISBN-10 or ISBN-13 (optional)
             format_type: "ebook" or "audiobook"
+            series: Series name (optional)
+            series_position: Position within the series (optional)
 
         Returns:
             List of Release objects

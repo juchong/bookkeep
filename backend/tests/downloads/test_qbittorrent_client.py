@@ -13,6 +13,8 @@ from app.downloads import DownloadState
 from app.downloads.clients.qbittorrent import (
     QBittorrentClient,
     extract_info_hash_from_torrent,
+    safe_download_source,
+    _torrent_add_succeeded,
     _bdecode,
     _bencode,
 )
@@ -342,6 +344,30 @@ class TestAddTorrent:
             call_kwargs = mock_qb_client.client.torrents_add.call_args.kwargs
             assert 'torrent_files' in call_kwargs
 
+    def test_add_torrent_accepts_structured_success(self, mock_qb_client, sample_torrent_bytes):
+        expected_hash = extract_info_hash_from_torrent(sample_torrent_bytes)
+        with patch.object(mock_qb_client, '_download_torrent_file', return_value=sample_torrent_bytes):
+            mock_qb_client.client.torrents_add.return_value = {
+                "added_torrent_ids": [expected_hash],
+                "failure_count": 0,
+                "pending_count": 0,
+                "success_count": 1,
+            }
+            mock_qb_client.client.torrents_info.return_value = [Mock(hash=expected_hash)]
+            mock_qb_client.client.torrents_categories.return_value = {}
+
+            assert mock_qb_client.add_torrent(url="https://example.com/book.torrent") == expected_hash
+
+    def test_add_torrent_rejects_structured_failure(self, mock_qb_client):
+        mock_qb_client.client.torrents_add.return_value = {
+            "added_torrent_ids": [],
+            "failure_count": 1,
+            "pending_count": 0,
+            "success_count": 0,
+        }
+        mock_qb_client.client.torrents_categories.return_value = {}
+
+        assert mock_qb_client.add_torrent(magnet="magnet:?xt=urn:btih:" + "a" * 40) is None
     def test_add_torrent_by_url_fallback_when_download_fails(self, mock_qb_client):
         """Test fallback to URL-based add when torrent file download fails"""
         # Mock failed download
@@ -479,6 +505,19 @@ class TestAddTorrent:
 
         # Should return None, NOT fall back to "most recent" torrent
         assert info_hash is None
+
+
+def test_torrent_add_response_compatibility():
+    assert _torrent_add_succeeded("Ok.")
+    assert _torrent_add_succeeded({"success_count": 1, "failure_count": 0})
+    assert not _torrent_add_succeeded({"success_count": 0, "failure_count": 1})
+    assert not _torrent_add_succeeded("unexpected")
+
+
+def test_safe_download_source_removes_credentials_and_magnet_details():
+    source = safe_download_source("https://user:pass@example.com/path/file.torrent?apikey=secret#part")
+    assert source == "https://example.com/path/file.torrent"
+    assert safe_download_source("magnet:?xt=urn:btih:secret") == "magnet:<redacted>"
 
 
 class TestGetDownloadStatus:

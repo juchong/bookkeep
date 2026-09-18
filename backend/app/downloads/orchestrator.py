@@ -4,8 +4,10 @@ Download orchestrator.
 Manages the complete download workflow from search to completion.
 """
 import os
+import re
 import shutil
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Optional, List, Dict
 from threading import Event
@@ -26,6 +28,77 @@ from ..models import Book, BookRequest, DownloadTask, AppSettings, DownloadClien
 from ..database import SessionLocal
 
 logger = structlog.get_logger()
+
+
+_MEDIA_EXTENSIONS = {
+    "ebook": {".azw", ".azw3", ".cbr", ".cbz", ".epub", ".mobi", ".pdf"},
+    "audiobook": {".aac", ".flac", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".wav"},
+}
+_TITLE_STOPWORDS = {"a", "an", "and", "by", "of", "the"}
+_GENERIC_SUBTITLE_WORDS = {"book", "edition", "novel", "novella", "series", "vol", "volume"}
+
+
+def _title_tokens(value: str) -> list[str]:
+    value = re.sub(r"[\(\[].*?[\)\]]", " ", value)
+    value = re.sub(r"['\u2019]s\b", "", value, flags=re.IGNORECASE)
+    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().casefold()
+    tokens = re.sub(r"[^a-z0-9]+", " ", value).split()
+    meaningful = [token for token in tokens if token not in _TITLE_STOPWORDS]
+    return meaningful or tokens
+
+
+def _title_variants(title: str) -> list[list[str]]:
+    variants = [_title_tokens(title)]
+    parts = [_title_tokens(part) for part in re.split(r":|\s+-\s+", title)]
+    if len(parts) > 1:
+        for index, part in enumerate(parts):
+            other_tokens = {token for i, tokens in enumerate(parts) if i != index for token in tokens}
+            if len(part) >= 3 or (
+                len(part) >= 2
+                and (other_tokens & _GENERIC_SUBTITLE_WORDS or any(token.isdigit() for token in other_tokens))
+            ):
+                variants.append(part)
+    return [variant for variant in variants if variant]
+
+
+def _candidate_tokens(value: str) -> set[str]:
+    tokens = set(_title_tokens(value))
+    aliases = {token[:-1] for token in tokens if len(token) > 3 and token.endswith("s")}
+    return tokens | aliases
+
+
+def _variant_matches(variant: list[str], candidate: set[str]) -> bool:
+    def present(token: str) -> bool:
+        return token in candidate or (len(token) > 3 and token.endswith("s") and token[:-1] in candidate)
+
+    return all(present(token) for token in variant)
+
+
+def _payload_matches_book(title: str, format_type: str, source_path: str) -> bool:
+    """Return whether a completed payload contains named media for the book."""
+    source = Path(source_path)
+    extensions = _MEDIA_EXTENSIONS.get(format_type)
+    if not extensions or not source.exists():
+        return False
+
+    if source.is_file():
+        media_files = [source] if source.suffix.casefold() in extensions else []
+    else:
+        media_files = [
+            path for path in source.rglob("*")
+            if path.is_file() and path.suffix.casefold() in extensions
+        ]
+
+    variants = _title_variants(title)
+    for media_file in media_files:
+        relative_name = media_file.name if source.is_file() else str(media_file.relative_to(source))
+        candidate_tokens = _candidate_tokens(f"{source.name} {relative_name}")
+        for variant in variants:
+            if _variant_matches(variant, candidate_tokens):
+                return True
+            if len(variant) >= 4 and _variant_matches(variant[:-1], candidate_tokens):
+                return True
+    return False
 
 
 class DownloadOrchestrator:
@@ -128,7 +201,9 @@ class DownloadOrchestrator:
                 title=book.title,
                 author=book.author,
                 isbn=book.isbn,
-                format_type=format_type
+                format_type=format_type,
+                series=book.series,
+                series_position=book.series_position,
             )
 
             # Filter releases to only include protocols with configured clients
@@ -374,29 +449,36 @@ class DownloadOrchestrator:
             if download_path:
                 # Success - copy/hardlink to destination
                 dest_path = self._copy_to_destination(task, download_path, db)
-
-                # Update task with final path (use dest_path if copy succeeded, otherwise source)
-                final_path = dest_path if dest_path else download_path
-
-                task.state = "complete"
-                task.progress = 100.0
-                task.download_path = final_path
-                db.commit()
-
-                # Cleanup
-                handler.cleanup(task, success=True)
-
-                # Only update book availability if import succeeded (dest_path is not None)
-                # This ensures books are only marked as available after successful import
                 if dest_path:
+                    task.state = "complete"
+                    task.progress = 100.0
+                    task.download_path = dest_path
+                    db.commit()
+                    handler.cleanup(task, success=True)
                     self._update_book_availability(task, db)
-
-                logger.info(
-                    "orchestrator_download_complete",
-                    task_id=task_id,
-                    source_path=download_path,
-                    final_path=final_path
-                )
+                    logger.info(
+                        "orchestrator_download_complete",
+                        task_id=task_id,
+                        source_path=download_path,
+                        final_path=dest_path,
+                    )
+                else:
+                    task.state = "error"
+                    task.progress = 100.0
+                    task.download_path = download_path
+                    task.message = task.import_message or "Download completed, but import failed"
+                    db.commit()
+                    # The transport succeeded; retain the completed client payload for diagnosis.
+                    handler.cleanup(task, success=True)
+                    logger.error(
+                        "download_task_failed",
+                        task_id=task_id,
+                        book_id=task.book_id,
+                        format=task.format,
+                        protocol=task.protocol,
+                        client_type=task.client_type,
+                        reason=task.message,
+                    )
 
             else:
                 # Failed
@@ -407,7 +489,15 @@ class DownloadOrchestrator:
                 # Cleanup
                 handler.cleanup(task, success=False)
 
-                logger.error("orchestrator_download_failed", task_id=task_id)
+                logger.error(
+                    "download_task_failed",
+                    task_id=task_id,
+                    book_id=task.book_id,
+                    format=task.format,
+                    protocol=task.protocol,
+                    client_type=task.client_type,
+                    reason=task.message or task.import_message or "Download handler returned no path",
+                )
 
         except Exception as e:
             logger.error("orchestrator_execute_error", task_id=task_id, error=str(e))
@@ -417,7 +507,18 @@ class DownloadOrchestrator:
                 task = db.query(DownloadTask).filter(DownloadTask.id == task_id).first()
                 if task:
                     task.state = "error"
+                    if not task.message:
+                        task.message = f"Download failed with {type(e).__name__}"
                     db.commit()
+                    logger.error(
+                        "download_task_failed",
+                        task_id=task_id,
+                        book_id=task.book_id,
+                        format=task.format,
+                        protocol=task.protocol,
+                        client_type=task.client_type,
+                        reason=task.message,
+                    )
             except:
                 pass
 
@@ -443,6 +544,24 @@ class DownloadOrchestrator:
             Destination path if successful, None otherwise
         """
         from datetime import datetime, timezone
+
+        if task.protocol in {"torrent", "usenet"}:
+            book = db.query(Book).filter(Book.id == task.book_id).first()
+            if not book or not _payload_matches_book(book.title, task.format, source_path):
+                task.state = 'error'
+                task.import_status = 'failed'
+                task.import_message = 'Completed payload does not match the requested book and format'
+                task.message = task.import_message
+                db.commit()
+                logger.error(
+                    "download_payload_mismatch",
+                    task_id=task.id,
+                    book_id=task.book_id,
+                    format=task.format,
+                    protocol=task.protocol,
+                    source_name=Path(source_path).name,
+                )
+                return None
 
         # Mark import as starting
         task.import_status = 'importing'

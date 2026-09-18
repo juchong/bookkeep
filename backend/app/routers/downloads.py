@@ -204,7 +204,9 @@ async def search_releases(
                     title=book.title,
                     author=book.author,
                     isbn=book.isbn,
-                    format_type=format_type
+                    format_type=format_type,
+                    series=book.series,
+                    series_position=book.series_position,
                 )
 
                 # Filter releases to only include protocols with configured clients
@@ -239,7 +241,9 @@ async def search_releases(
                 title=book.title,
                 author=book.author,
                 isbn=book.isbn,
-                format_type=format_type
+                format_type=format_type,
+                series=book.series,
+                series_position=book.series_position,
             )
             releases.extend(direct_releases)
             logger.info(
@@ -495,6 +499,18 @@ async def get_download_tasks(
         result.append(task_dict)
 
     return result
+
+
+@router.post("/tasks/rescan")
+def rescan_download_tasks(
+    dry_run: bool = True,
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Reconcile non-imported tasks with existing download-client items."""
+    from app.tasks import rescan_downloads
+
+    return rescan_downloads(db, dry_run=dry_run)
 
 
 @router.get("/tasks/{task_id}/log")

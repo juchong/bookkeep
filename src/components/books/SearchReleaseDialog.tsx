@@ -519,7 +519,7 @@ export function SearchReleaseDialog({
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm text-red-400">
                     <XCircle className="h-4 w-4" />
-                    <span>{task?.import_status === 'failed' ? task.import_message || 'Import Failed' : task?.protocol === 'direct' && task?.message ? task.message : 'Download Failed'}</span>
+                    <span>{task?.import_status === 'failed' ? task.import_message || 'Import Failed' : task?.message || 'Download Failed'}</span>
                   </div>
                   <Button
                     size="sm"

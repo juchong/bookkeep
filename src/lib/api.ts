@@ -1025,6 +1025,29 @@ export interface DownloadLog {
   message?: string;
 }
 
+export interface DownloadRescanResult {
+  task_id: number;
+  protocol: string;
+  outcome: 'would_import' | 'imported' | 'active' | 'unmatched' | 'ambiguous' | 'mismatched' | 'skipped' | 'failed';
+  message: string;
+  client_id: string | null;
+}
+
+export interface DownloadRescanSummary {
+  dry_run: boolean;
+  scanned: number;
+  matched: number;
+  completed: number;
+  imported: number;
+  active: number;
+  unmatched: number;
+  ambiguous: number;
+  mismatched: number;
+  skipped: number;
+  failed: number;
+  results: DownloadRescanResult[];
+}
+
 export const downloadsApi = {
   // Search for releases
   // source: 'prowlarr' | 'direct' | undefined (undefined = all sources)
@@ -1067,7 +1090,12 @@ export const downloadsApi = {
     return apiRequest<DownloadTask[]>(`/api/downloads/tasks${query ? `?${query}` : ''}`);
   },
 
-  // Get download log for a specific task (direct downloads only)
+  rescan: (dryRun: boolean) =>
+    apiRequest<DownloadRescanSummary>(`/api/downloads/tasks/rescan?dry_run=${dryRun}`, {
+      method: 'POST',
+    }),
+
+  // Get download log for a specific task
   getTaskLog: (taskId: number) =>
     apiRequest<DownloadLog>(`/api/downloads/tasks/${taskId}/log`),
 

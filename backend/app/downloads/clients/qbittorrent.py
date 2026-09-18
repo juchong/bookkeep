@@ -5,8 +5,10 @@ Provides downloading capabilities for torrent files via qBittorrent Web API.
 """
 import time
 import hashlib
+from collections.abc import Mapping
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 import structlog
 import requests
 
@@ -30,6 +32,34 @@ except ImportError:
 from ..import DownloadState
 
 logger = structlog.get_logger()
+
+
+def safe_download_source(value: Optional[str]) -> Optional[str]:
+    """Return a source identifier that cannot expose query-string credentials."""
+    if not value:
+        return None
+    if value.startswith("magnet:"):
+        return "magnet:<redacted>"
+
+    parsed = urlsplit(value)
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def _torrent_add_succeeded(result: Any) -> bool:
+    """Accept both legacy text and current structured qBittorrent responses."""
+    if result == "Ok.":
+        return True
+    if not isinstance(result, Mapping):
+        return False
+
+    try:
+        failures = int(result.get("failure_count", 0) or 0)
+        successes = int(result.get("success_count", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    added_ids = result.get("added_torrent_ids") or []
+    return failures == 0 and (successes > 0 or bool(added_ids))
 
 
 def _bdecode(data: bytes, index: int = 0) -> Tuple[Any, int]:
@@ -281,7 +311,12 @@ class QBittorrentClient:
             logger.warning("qbittorrent_test_failed", error=str(e))
             return False
 
-    def _download_torrent_file(self, url: str, timeout: int = 30) -> Optional[bytes]:
+    def _download_torrent_file(
+        self,
+        url: str,
+        timeout: int = 30,
+        log_errors: bool = True,
+    ) -> Optional[bytes]:
         """
         Download a .torrent file from a URL.
 
@@ -293,7 +328,7 @@ class QBittorrentClient:
             Torrent file bytes, or None if download fails
         """
         try:
-            logger.info("downloading_torrent_file", url=url[:100])
+            logger.info("downloading_torrent_file", source=safe_download_source(url))
 
             response = requests.get(
                 url,
@@ -326,10 +361,21 @@ class QBittorrentClient:
             return content
 
         except requests.RequestException as e:
-            logger.error("torrent_file_download_failed", url=url[:100], error=str(e))
+            log = logger.error if log_errors else logger.info
+            log(
+                "torrent_file_download_failed",
+                source=safe_download_source(url),
+                error_type=type(e).__name__,
+                status_code=getattr(getattr(e, "response", None), "status_code", None),
+            )
             return None
         except Exception as e:
-            logger.error("torrent_file_download_error", url=url[:100], error=str(e))
+            log = logger.error if log_errors else logger.info
+            log(
+                "torrent_file_download_error",
+                source=safe_download_source(url),
+                error_type=type(e).__name__,
+            )
             return None
 
     def add_torrent(
@@ -395,13 +441,26 @@ class QBittorrentClient:
             if torrent_data:
                 info_hash = extract_info_hash_from_torrent(torrent_data)
                 if info_hash:
-                    logger.info("qbittorrent_hash_from_torrent_file", hash=info_hash, url=url[:100])
+                    logger.info(
+                        "qbittorrent_hash_from_torrent_file",
+                        hash=info_hash,
+                        source=safe_download_source(url),
+                    )
                 else:
-                    logger.warning("qbittorrent_torrent_file_hash_extraction_failed", url=url[:100])
+                    logger.warning(
+                        "qbittorrent_torrent_file_hash_extraction_failed",
+                        source=safe_download_source(url),
+                    )
             else:
-                logger.error("qbittorrent_torrent_file_download_failed", url=url[:100])
+                logger.error(
+                    "qbittorrent_torrent_file_download_failed",
+                    source=safe_download_source(url),
+                )
                 # Fall back to passing URL directly to qBittorrent (legacy behavior)
-                logger.info("qbittorrent_falling_back_to_url_add", url=url[:100])
+                logger.info(
+                    "qbittorrent_falling_back_to_url_add",
+                    source=safe_download_source(url),
+                )
 
         elif torrent_file:
             # Extract hash from provided torrent file bytes
@@ -434,16 +493,24 @@ class QBittorrentClient:
                 result = self.client.torrents_add(torrent_files=torrent_data, **add_params)
             elif url:
                 # Fallback: pass URL directly (less reliable for tracking)
-                logger.info("qbittorrent_add_url", url=url[:100], category=category)
+                logger.info(
+                    "qbittorrent_add_url",
+                    source=safe_download_source(url),
+                    category=category,
+                )
                 result = self.client.torrents_add(urls=url, **add_params)
             else:
                 logger.error("qbittorrent_no_torrent_source")
                 return None
 
-            # qBittorrent returns "Ok." on success
-            if result != "Ok.":
+            if not _torrent_add_succeeded(result):
                 logger.warning("qbittorrent_add_unexpected_response", result=result)
                 return None
+
+            if not info_hash and isinstance(result, Mapping):
+                added_ids = result.get("added_torrent_ids") or []
+                if len(added_ids) == 1:
+                    info_hash = str(added_ids[0]).lower()
 
             # --- Phase 3: Verify torrent was added ---
             if info_hash:

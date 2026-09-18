@@ -75,7 +75,9 @@ class ProwlarrSource(ReleaseSource):
         title: str,
         author: Optional[str] = None,
         isbn: Optional[str] = None,
-        format_type: str = "ebook"
+        format_type: str = "ebook",
+        series: Optional[str] = None,
+        series_position: Optional[float] = None,
     ) -> List[Release]:
         """
         Search for book releases.
@@ -85,6 +87,8 @@ class ProwlarrSource(ReleaseSource):
             author: Book author (optional)
             isbn: ISBN (optional)
             format_type: "ebook" or "audiobook"
+            series: Series name (optional)
+            series_position: Position within the series (optional)
 
         Returns:
             List of Release objects
@@ -144,9 +148,26 @@ class ProwlarrSource(ReleaseSource):
 
         # Convert to Release objects with author validation
         releases = []
+        seen_releases = set()
         for result in all_results:
-            release = self._convert_to_release(result, format_type, author, title)
+            release = self._convert_to_release(
+                result,
+                format_type,
+                author,
+                title,
+                series,
+                series_position,
+            )
             if release:
+                release_key = (
+                    release.title.casefold().strip(),
+                    release.protocol,
+                    release.indexer or "",
+                    release.size_bytes,
+                )
+                if release_key in seen_releases:
+                    continue
+                seen_releases.add(release_key)
                 releases.append(release)
 
         # Sort by quality score (highest first)
@@ -166,7 +187,9 @@ class ProwlarrSource(ReleaseSource):
         prowlarr_result: dict,
         format_type: str,
         expected_author: Optional[str] = None,
-        expected_title: Optional[str] = None
+        expected_title: Optional[str] = None,
+        expected_series: Optional[str] = None,
+        expected_series_position: Optional[float] = None,
     ) -> Optional[Release]:
         """
         Convert Prowlarr result to Release object.
@@ -176,6 +199,8 @@ class ProwlarrSource(ReleaseSource):
             format_type: Expected format type ("ebook" or "audiobook")
             expected_author: Expected author name for validation (optional)
             expected_title: Expected book title for validation (optional)
+            expected_series: Expected series name for validation (optional)
+            expected_series_position: Expected position in that series (optional)
 
         Returns:
             Release object or None if invalid
@@ -203,6 +228,20 @@ class ProwlarrSource(ReleaseSource):
                 "prowlarr_title_mismatch",
                 release_title=title[:100],
                 expected_title=expected_title
+            )
+            return None
+
+        if not self._series_position_matches(
+            title,
+            expected_title,
+            expected_series,
+            expected_series_position,
+        ):
+            logger.debug(
+                "prowlarr_series_position_mismatch",
+                release_title=title[:100],
+                expected_series=expected_series,
+                expected_series_position=expected_series_position,
             )
             return None
 
@@ -320,6 +359,62 @@ class ProwlarrSource(ReleaseSource):
         "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for",
         "is", "it", "by", "with", "from", "as", "but", "not", "no", "be",
     })
+
+    def _series_position_matches(
+        self,
+        release_title: str,
+        expected_title: Optional[str],
+        expected_series: Optional[str],
+        expected_position: Optional[float],
+    ) -> bool:
+        """Reject explicit series markers that contradict the requested book."""
+        if expected_position is None:
+            return True
+
+        try:
+            position = float(expected_position)
+        except (TypeError, ValueError):
+            return True
+
+        normalized_release = normalize_title(release_title).lower()
+        normalized_expected = normalize_title(expected_title or "").lower()
+
+        # A multi-book pack is not an exact match for one requested volume.
+        if re.search(
+            r"\b(?:books?|series)\s*#?\s*\d+(?:\.\d+)?\s*"
+            r"(?:-|\u2013|\u2014|to)\s*\d+(?:\.\d+)?\b",
+            normalized_release,
+        ):
+            return False
+
+        markers = re.findall(
+            r"\bbooks?\s*#?\s*0*(\d+(?:\.\d+)?)\b",
+            normalized_release,
+        )
+
+        if expected_series:
+            series_words = normalize_title(expected_series).lower().split()
+            if series_words:
+                series_pattern = r"\b" + r"\s+".join(
+                    re.escape(word) for word in series_words
+                ) + r"\b"
+                markers.extend(re.findall(
+                    series_pattern
+                    + r"[\s,:-]+(?:books?\s*)?#?\s*0*(\d{1,3}(?:\.\d+)?)\b",
+                    normalized_release,
+                ))
+
+        if any(abs(float(marker) - position) > 0.001 for marker in markers):
+            return False
+
+        # Audio adaptations use season numbers that do not map reliably to books.
+        if "season" not in normalized_expected and re.search(
+            r"\bseason\s*#?\s*\d+(?:\.\d+)?\b",
+            normalized_release,
+        ):
+            return False
+
+        return True
 
     def _title_matches(self, release_title: str, expected_title: str) -> bool:
         """

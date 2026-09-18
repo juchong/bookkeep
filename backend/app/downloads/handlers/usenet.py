@@ -190,7 +190,6 @@ class UsenetHandler(DownloadHandler):
                 logger.info(
                     "usenet_adding",
                     task_id=task.id,
-                    url=task.download_url,
                     format=task.format
                 )
 

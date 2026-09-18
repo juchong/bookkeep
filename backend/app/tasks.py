@@ -11,6 +11,7 @@ from app.models import Book
 from app import schemas
 from app.routers.hardcover import execute_graphql, _parse_hardcover_book
 from app.routers.settings import get_hardcover_token
+from app.downloads.orchestrator import _payload_matches_book
 import structlog
 
 logger = structlog.get_logger()
@@ -1613,6 +1614,254 @@ def _build_usenet_client(config):
     raise ValueError(f"Unsupported Usenet client type: {config.type}")
 
 
+def _resolve_torrent_rescan_id(task, client) -> Optional[str]:
+    """Resolve a torrent task to an exact info hash without adding anything."""
+    client_id = _client_download_key(task)
+    if client_id:
+        return client_id.lower()
+
+    source = task.download_url or ""
+    if source.startswith("magnet:"):
+        return client._extract_hash_from_magnet(source)
+    if source.startswith(("http://", "https://")):
+        from app.downloads.clients.qbittorrent import extract_info_hash_from_torrent
+
+        torrent_data = client._download_torrent_file(source, log_errors=False)
+        if torrent_data:
+            return extract_info_hash_from_torrent(torrent_data)
+    return None
+
+
+def _normalized_usenet_name(value: Optional[str]) -> str:
+    value = (value or "").strip().casefold()
+    return value[:-4] if value.endswith(".nzb") else value
+
+
+def _find_usenet_rescan_ids(task, client, client_type: str) -> list[str]:
+    """Find unique exact-name/category matches in a Usenet queue and history."""
+    expected_name = _normalized_usenet_name(task.release_title)
+    expected_category = (client.category or "").casefold()
+    if not expected_name:
+        return []
+
+    matches = set()
+    items = [(item, False) for item in client.get_queue()]
+    items.extend((item, True) for item in client.get_history())
+    for item, is_history in items:
+        if client_type == "sabnzbd":
+            name = item.get("name" if is_history else "filename")
+            category = item.get("category" if is_history else "cat", "")
+            item_id = item.get("nzo_id")
+        else:
+            name = item.get("NZBName")
+            category = item.get("Category", "")
+            item_id = item.get("NZBID")
+
+        if _normalized_usenet_name(name) != expected_name:
+            continue
+        if expected_category and str(category).casefold() != expected_category:
+            continue
+        if item_id is not None:
+            matches.add(str(item_id))
+    return sorted(matches)
+
+
+def _rescan_result(task, outcome: str, message: str, client_id: Optional[str] = None) -> dict:
+    return {
+        "task_id": task.id,
+        "protocol": task.protocol,
+        "outcome": outcome,
+        "message": message,
+        "client_id": client_id,
+    }
+
+
+def rescan_downloads(db: Session, dry_run: bool = True) -> dict:
+    """Reconcile non-imported tasks with existing qBittorrent/Usenet items."""
+    from app.downloads.handlers.torrent import TorrentHandler
+    from app.downloads.handlers.usenet import UsenetHandler
+    from app.models import DownloadTask
+
+    tasks = db.query(DownloadTask).filter(
+        DownloadTask.protocol.in_(("torrent", "usenet")),
+        or_(
+            DownloadTask.import_status.is_(None),
+            DownloadTask.import_status != "imported",
+        ),
+    ).order_by(DownloadTask.id.desc()).all()
+
+    summary = {
+        "dry_run": dry_run,
+        "scanned": len(tasks),
+        "matched": 0,
+        "completed": 0,
+        "imported": 0,
+        "active": 0,
+        "unmatched": 0,
+        "ambiguous": 0,
+        "mismatched": 0,
+        "skipped": 0,
+        "failed": 0,
+        "results": [],
+    }
+    torrent_handler = TorrentHandler(db_session=db)
+    usenet_handler = UsenetHandler(db_session=db)
+    now = datetime.now(timezone.utc)
+    completed_keys = set()
+
+    for task in tasks:
+        try:
+            client = torrent_handler._get_client(task) if task.protocol == "torrent" else usenet_handler._get_client(task)
+            if client is None:
+                summary["failed"] += 1
+                summary["results"].append(_rescan_result(task, "failed", "No enabled download client"))
+                continue
+
+            if task.protocol == "torrent":
+                client_id = _resolve_torrent_rescan_id(task, client)
+                if not client_id or not client.find_existing_download(info_hash=client_id):
+                    summary["unmatched"] += 1
+                    summary["results"].append(
+                        _rescan_result(task, "unmatched", "No exact qBittorrent hash match")
+                    )
+                    continue
+                client_type = "qbittorrent"
+            else:
+                client_type = task.client_type or type(client).__name__.removesuffix("Client").lower()
+                client_id = str(task.client_download_id) if task.client_download_id else None
+                if client_id:
+                    if client_type == "sabnzbd":
+                        client_id = client.find_existing_download(nzo_id=client_id)
+                    else:
+                        client_id = client.find_existing_download(nzb_id=int(client_id))
+                    client_id = str(client_id) if client_id is not None else None
+                else:
+                    matches = _find_usenet_rescan_ids(task, client, client_type)
+                    if len(matches) > 1:
+                        summary["ambiguous"] += 1
+                        summary["results"].append(
+                            _rescan_result(task, "ambiguous", "Multiple exact Usenet matches")
+                        )
+                        continue
+                    client_id = matches[0] if matches else None
+                if not client_id:
+                    summary["unmatched"] += 1
+                    summary["results"].append(
+                        _rescan_result(task, "unmatched", "No exact Usenet match")
+                    )
+                    continue
+
+            summary["matched"] += 1
+            status = client.get_download_status(client_id)
+            state = _download_state_name(status.get("state"))
+            if state == "error":
+                summary["failed"] += 1
+                summary["results"].append(
+                    _rescan_result(task, "failed", status.get("message") or "Client reports an error", client_id)
+                )
+                continue
+
+            if state in ("complete", "seeding"):
+                source_path = client.get_completed_download_path(client_id)
+                if not source_path:
+                    summary["failed"] += 1
+                    summary["results"].append(
+                        _rescan_result(task, "failed", "Completed client item has no source path", client_id)
+                    )
+                    continue
+                if not _payload_matches_book(task.book.title, task.format, source_path):
+                    summary["mismatched"] += 1
+                    summary["results"].append(
+                        _rescan_result(
+                            task,
+                            "mismatched",
+                            "Completed payload does not match the requested book and format",
+                            client_id,
+                        )
+                    )
+                    logger.error(
+                        "download_payload_mismatch",
+                        task_id=task.id,
+                        book_id=task.book_id,
+                        format=task.format,
+                        protocol=task.protocol,
+                    )
+                    continue
+                task_key = (task.book_id, task.format)
+                if task_key in completed_keys:
+                    summary["skipped"] += 1
+                    summary["results"].append(
+                        _rescan_result(
+                            task,
+                            "skipped",
+                            "A newer completed task for this book and format was selected",
+                            client_id,
+                        )
+                    )
+                    continue
+                completed_keys.add(task_key)
+                summary["completed"] += 1
+                if dry_run:
+                    summary["results"].append(
+                        _rescan_result(task, "would_import", "Completed download is ready to import", client_id)
+                    )
+                    continue
+
+                task.client_type = client_type
+                task.client_download_id = client_id
+                task.client_state = state
+                task.state = state
+                task.progress = 100.0
+                task.completed_at = task.completed_at or now
+                task.message = "Recovered by download rescan"
+                db.commit()
+                if _recover_completed_download(db, task, client, client_id, source_path=source_path):
+                    summary["imported"] += 1
+                    summary["results"].append(
+                        _rescan_result(task, "imported", task.import_message or "Imported", client_id)
+                    )
+                else:
+                    summary["failed"] += 1
+                    summary["results"].append(
+                        _rescan_result(task, "failed", task.import_message or "Import failed", client_id)
+                    )
+                continue
+
+            summary["active"] += 1
+            summary["results"].append(
+                _rescan_result(task, "active", f"Matched non-complete client item ({state}); left unchanged", client_id)
+            )
+
+        except Exception as exc:
+            summary["failed"] += 1
+            message = f"Rescan failed with {type(exc).__name__}"
+            summary["results"].append(_rescan_result(task, "failed", message))
+            logger.error(
+                "download_rescan_failed",
+                task_id=task.id,
+                protocol=task.protocol,
+                error_type=type(exc).__name__,
+            )
+
+    if not dry_run:
+        db.commit()
+    logger.info(
+        "download_rescan_complete",
+        dry_run=dry_run,
+        scanned=summary["scanned"],
+        matched=summary["matched"],
+        completed=summary["completed"],
+        imported=summary["imported"],
+        active=summary["active"],
+        unmatched=summary["unmatched"],
+        ambiguous=summary["ambiguous"],
+        mismatched=summary["mismatched"],
+        skipped=summary["skipped"],
+        failed=summary["failed"],
+    )
+    return summary
+
+
 def _mark_download_reconciliation_failed(task, message: str, client_state: str) -> None:
     task.state = 'error'
     task.client_state = client_state
@@ -1628,11 +1877,17 @@ def _mark_download_reconciliation_failed(task, message: str, client_state: str) 
     )
 
 
-def _recover_completed_download(db: Session, task, client, client_id: str) -> bool:
+def _recover_completed_download(
+    db: Session,
+    task,
+    client,
+    client_id: str,
+    source_path: Optional[str] = None,
+) -> bool:
     from app.downloads.orchestrator import DownloadOrchestrator
 
     try:
-        source_path = client.get_completed_download_path(client_id)
+        source_path = source_path or client.get_completed_download_path(client_id)
         if not source_path:
             task.import_status = 'failed'
             task.import_message = 'Download completed, but the client returned no source path'

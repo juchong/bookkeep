@@ -91,7 +91,9 @@ class DirectDownloadSource(ReleaseSource):
         title: str,
         author: Optional[str] = None,
         isbn: Optional[str] = None,
-        format_type: str = "ebook"
+        format_type: str = "ebook",
+        series: Optional[str] = None,
+        series_position: Optional[float] = None,
     ) -> List[Release]:
         """
         Search all enabled providers and return unified results.
@@ -104,6 +106,8 @@ class DirectDownloadSource(ReleaseSource):
             author: Author name (optional)
             isbn: ISBN (optional)
             format_type: "ebook" or "audiobook"
+            series: Unused; accepted for the shared release-source interface
+            series_position: Unused; accepted for the shared interface
 
         Returns:
             List of Release objects with protocol="direct"

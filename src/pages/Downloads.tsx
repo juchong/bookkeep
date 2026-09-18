@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { usePageVisibility } from '@/hooks/usePageVisibility';
-import { Download, RefreshCw, Clock, CheckCircle, XCircle, Pause, FolderInput, Trash2, AlertCircle, Loader2, RotateCcw, ExternalLink } from 'lucide-react';
+import { Download, RefreshCw, Clock, CheckCircle, XCircle, Pause, FolderInput, Trash2, AlertCircle, Loader2, RotateCcw, ExternalLink, ScanSearch } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -21,8 +21,19 @@ import {
 } from '@/components/ui/tooltip';
 import { toast } from 'sonner';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
-import { downloadsApi } from '@/lib/api';
+import { downloadsApi, DownloadRescanSummary } from '@/lib/api';
 import { DownloadLogPanel } from '@/components/downloads/DownloadLogPanel';
+import { useUser } from '@/contexts/UserContext';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 interface DownloadTask {
   id: number;
@@ -204,7 +215,9 @@ const getInitialCompletedTasks = () => {
 export default function Downloads() {
   const queryClient = useQueryClient();
   const isVisible = usePageVisibility();
+  const { isAdmin } = useUser();
   const [filterState, setFilterState] = useState<string | undefined>(undefined);
+  const [rescanPreview, setRescanPreview] = useState<DownloadRescanSummary | null>(null);
   const completedTasksRef = useRef<Set<number>>(getInitialCompletedTasks());
 
   const { data: tasks = [], isLoading, error, refetch } = useQuery<DownloadTask[], Error>({
@@ -254,9 +267,6 @@ export default function Downloads() {
   // Retry a failed download mutation
   const retryMutation = useMutation({
     mutationFn: async (task: DownloadTask) => {
-      // Delete the old error task first so it doesn't clog the list
-      await downloadsApi.deleteTask(task.id);
-      // Re-queue the exact same download
       return downloadsApi.downloadRelease({
         book_id: task.book_id,
         format_type: task.format,
@@ -264,6 +274,7 @@ export default function Downloads() {
         protocol: task.protocol,
         release_title: task.release_title,
         indexer: task.source || undefined,
+        size_bytes: 0,
       });
     },
     onSuccess: (data) => {
@@ -272,6 +283,30 @@ export default function Downloads() {
     },
     onError: (err: Error) => {
       toast.error('Retry failed', { description: err.message });
+    },
+  });
+
+  const rescanPreviewMutation = useMutation({
+    mutationFn: () => downloadsApi.rescan(true),
+    onSuccess: setRescanPreview,
+    onError: (err: Error) => {
+      toast.error('Rescan preview failed', { description: err.message });
+    },
+  });
+
+  const rescanApplyMutation = useMutation({
+    mutationFn: () => downloadsApi.rescan(false),
+    onSuccess: (result) => {
+      setRescanPreview(null);
+      toast.success('Download rescan complete', {
+        description: `${result.imported} imported, ${result.mismatched} mismatched, ${result.active} active, ${result.unmatched} unmatched`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['download-tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['books'] });
+      queryClient.invalidateQueries({ queryKey: ['hardcover'] });
+    },
+    onError: (err: Error) => {
+      toast.error('Download rescan failed', { description: err.message });
     },
   });
 
@@ -394,12 +429,59 @@ export default function Downloads() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-foreground">Downloads</h1>
-        <p className="text-muted-foreground mt-1">
-          Monitor your active downloads and view download history.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-foreground">Downloads</h1>
+          <p className="text-muted-foreground mt-1">
+            Monitor your active downloads and view download history.
+          </p>
+        </div>
+        {isAdmin && (
+          <Button
+            variant="outline"
+            onClick={() => rescanPreviewMutation.mutate()}
+            disabled={rescanPreviewMutation.isPending || rescanApplyMutation.isPending}
+          >
+            {rescanPreviewMutation.isPending ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <ScanSearch className="h-4 w-4 mr-2" />
+            )}
+            Rescan
+          </Button>
+        )}
       </div>
+
+      <AlertDialog open={rescanPreview !== null} onOpenChange={(open) => !open && setRescanPreview(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Apply download rescan?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {rescanPreview
+                ? `Scanned ${rescanPreview.scanned} tasks. ${rescanPreview.completed} completed downloads can be imported, ${rescanPreview.mismatched} payloads do not match their requested books, ${rescanPreview.skipped} older duplicates will be skipped, ${rescanPreview.active} non-complete matches will remain unchanged, and ${rescanPreview.unmatched} had no exact match.`
+                : 'Preparing rescan preview.'}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          {rescanPreview && (rescanPreview.ambiguous > 0 || rescanPreview.mismatched > 0 || rescanPreview.failed > 0) && (
+            <p className="text-sm text-destructive">
+              {rescanPreview.ambiguous} ambiguous, {rescanPreview.mismatched} mismatched, and {rescanPreview.failed} failed checks will remain unchanged.
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={rescanApplyMutation.isPending}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                rescanApplyMutation.mutate();
+              }}
+              disabled={rescanApplyMutation.isPending || !rescanPreview || rescanPreview.completed === 0}
+            >
+              {rescanApplyMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Apply
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
@@ -556,11 +638,7 @@ export default function Downloads() {
                               </TooltipTrigger>
                               <TooltipContent className="max-w-sm bg-popover border-border">
                                 <p className="text-xs">
-                                  {task.message?.includes('403') || task.message?.toLowerCase().includes('sources failed')
-                                    ? 'Direct download sources blocked. Try torrent/usenet instead.'
-                                    : task.message?.toLowerCase().includes('no path')
-                                    ? 'Configure download path in Settings'
-                                    : 'Check download log for details'}
+                                  {task.message || task.import_message || 'No failure detail was recorded'}
                                 </p>
                               </TooltipContent>
                             </Tooltip>
@@ -576,7 +654,7 @@ export default function Downloads() {
                             {task.message}
                           </span>
                         )}
-                        {task.state === 'error' && task.protocol === 'direct' && task.message && (
+                        {task.state === 'error' && task.message && (
                           <span className="text-xs text-destructive font-medium truncate max-w-[180px]" title={task.message}>
                             {task.message}
                           </span>

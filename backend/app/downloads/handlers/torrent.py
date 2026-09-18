@@ -171,7 +171,6 @@ class TorrentHandler(DownloadHandler):
                 logger.info(
                     "torrent_adding",
                     task_id=task.id,
-                    url=task.download_url,
                     format=task.format
                 )
 
@@ -198,7 +197,7 @@ class TorrentHandler(DownloadHandler):
                     logger.error(
                         "torrent_add_failed",
                         task_id=task.id,
-                        url=task.download_url[:100] if task.download_url else None
+                        format=task.format,
                     )
                     if status_callback:
                         status_callback(DownloadStatus(
