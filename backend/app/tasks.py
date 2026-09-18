@@ -5,7 +5,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, func as sa_func
+from sqlalchemy import and_, or_, func as sa_func
 from app.database import SessionLocal
 from app.models import Book
 from app import schemas
@@ -1296,17 +1296,23 @@ async def sync_download_states():
     Background task to sync download states from download clients.
     Updates orphaned downloads that lost their handler threads after backend restart.
     """
-    from app.models import DownloadTask, DownloadClient
-    from app.downloads.clients.qbittorrent import QBittorrentClient
-    from app.downloads.clients.nzbget import NZBGetClient
-
+    from app.models import DownloadTask
     db: Session = SessionLocal()
     try:
         logger.info("sync_download_states_starting")
 
         # Get all active download tasks that might need syncing
         tasks = db.query(DownloadTask).filter(
-            DownloadTask.state.in_(['downloading', 'queued', 'checking', 'paused'])
+            or_(
+                DownloadTask.state.in_(['downloading', 'queued', 'checking', 'paused']),
+                and_(
+                    DownloadTask.state.in_(['complete', 'seeding']),
+                    or_(
+                        DownloadTask.import_status.is_(None),
+                        DownloadTask.import_status != 'imported',
+                    ),
+                ),
+            )
         ).all()
 
         if not tasks:
@@ -1377,49 +1383,76 @@ async def _sync_torrent_downloads(db: Session, tasks: list) -> int:
         logger.info("sync_torrents_fetched", count=len(all_torrents))
 
         updated = 0
+        now = datetime.now(timezone.utc)
         for task in tasks:
-            if not task.info_hash:
+            torrent_hash = _client_download_key(task)
+            stale = _task_is_stale(task, now)
+            if not torrent_hash:
+                if stale:
+                    _mark_download_reconciliation_failed(
+                        task,
+                        "Download has no qBittorrent client identifier",
+                        client_state="missing-id",
+                    )
+                    updated += 1
                 continue
 
-            torrent_hash = task.info_hash.lower()
-            if torrent_hash in torrent_map:
-                torrent = torrent_map[torrent_hash]
+            torrent = torrent_map.get(torrent_hash.lower())
+            if torrent is None:
+                if stale:
+                    _mark_download_reconciliation_failed(
+                        task,
+                        "Download no longer exists in qBittorrent",
+                        client_state="missing",
+                    )
+                    updated += 1
+                continue
 
-                # Map qBittorrent state to our state
-                old_state = task.state
-                old_client_state = task.client_state
+            old_state = task.state
+            old_client_state = task.client_state
+            qb_state = str(torrent.state).lower()
+            progress = float(torrent.progress) * 100
 
-                qb_state = torrent.state.lower()
-                if 'error' in qb_state or 'missing' in qb_state:
-                    task.state = 'error'
-                    task.message = f"qBittorrent error: {torrent.state}"
-                elif qb_state in ['pauseddl', 'pausedup']:
-                    task.state = 'paused'
-                elif qb_state in ['queueddl', 'queuedup']:
-                    task.state = 'queued'
-                elif qb_state in ['checkingdl', 'checkingup', 'checkingresumedata']:
-                    task.state = 'checking'
-                elif qb_state in ['downloading', 'metadl', 'forceddl']:
-                    task.state = 'downloading'
-                elif qb_state in ['uploading', 'forcedup', 'stalledup']:
-                    task.state = 'seeding'
-                elif torrent.progress >= 1.0:
-                    task.state = 'complete'
-                    if not task.completed_at:
-                        task.completed_at = datetime.now(timezone.utc)
+            if 'error' in qb_state or 'missing' in qb_state:
+                _mark_download_reconciliation_failed(
+                    task,
+                    f"qBittorrent error: {torrent.state}",
+                    client_state=str(torrent.state),
+                )
+            elif qb_state == 'stalleddl' and _torrent_stalled_too_long(torrent, now):
+                _mark_download_reconciliation_failed(
+                    task,
+                    "qBittorrent download has made no progress for 24 hours",
+                    client_state=str(torrent.state),
+                )
+            elif float(torrent.progress) >= 1.0:
+                task.state = 'seeding' if qb_state.endswith('up') else 'complete'
+                if not task.completed_at:
+                    task.completed_at = now
+            elif qb_state in ['pauseddl', 'pausedup']:
+                task.state = 'paused'
+            elif qb_state in ['queueddl', 'queuedup']:
+                task.state = 'queued'
+            elif qb_state in ['checkingdl', 'checkingup', 'checkingresumedata']:
+                task.state = 'checking'
+            else:
+                task.state = 'downloading'
 
-                # Update client_state and progress
-                task.client_state = torrent.state
-                task.progress = torrent.progress * 100
+            task.client_state = str(torrent.state)
+            task.progress = progress
 
-                if old_state != task.state or old_client_state != task.client_state:
-                    logger.info("sync_torrent_updated",
-                               task_id=task.id,
-                               old_state=old_state,
-                               new_state=task.state,
-                               old_client_state=old_client_state,
-                               new_client_state=task.client_state,
-                               progress=task.progress)
+            if old_state != task.state or old_client_state != task.client_state:
+                logger.info("sync_torrent_updated",
+                           task_id=task.id,
+                           old_state=old_state,
+                           new_state=task.state,
+                           old_client_state=old_client_state,
+                           new_client_state=task.client_state,
+                           progress=task.progress)
+                updated += 1
+
+            if task.state in ('complete', 'seeding') and stale and task.import_status != 'imported':
+                if _recover_completed_download(db, task, client, torrent_hash):
                     updated += 1
 
         db.commit()
@@ -1431,82 +1464,91 @@ async def _sync_torrent_downloads(db: Session, tasks: list) -> int:
 
 
 async def _sync_usenet_downloads(db: Session, tasks: list) -> int:
-    """Sync usenet download states from NZBGet"""
+    """Sync usenet download states from the configured SABnzbd/NZBGet clients."""
     from app.models import DownloadClient
-    from app.downloads.clients.nzbget import NZBGetClient
 
     try:
-        # Get enabled NZBGet client
-        client_config = db.query(DownloadClient).filter(
-            DownloadClient.type == 'nzbget',
+        client_configs = db.query(DownloadClient).filter(
+            DownloadClient.protocol == 'usenet',
             DownloadClient.enabled == True
-        ).first()
+        ).order_by(DownloadClient.priority.desc()).all()
 
-        if not client_config:
+        if not client_configs:
             logger.warning("sync_usenet_no_client")
             return 0
 
-        # Connect to client
-        client = NZBGetClient(
-            host=client_config.host,
-            port=client_config.port,
-            username=client_config.username,
-            password=client_config.password,
-            use_ssl=client_config.use_ssl,
-            url_base=client_config.url_base,
-        )
-
-        if not client.test_connection():
-            logger.error("sync_usenet_connection_failed")
-            return 0
-
-        # Get all downloads from client
-        all_downloads = client.get_all_downloads()
-        download_map = {d['nzb_id']: d for d in all_downloads}
-
-        logger.info("sync_usenet_fetched", count=len(all_downloads))
+        config_by_type = {config.type: config for config in client_configs}
+        clients = {}
 
         updated = 0
+        now = datetime.now(timezone.utc)
         for task in tasks:
-            if not task.info_hash:
+            stale = _task_is_stale(task, now)
+            client_type = task.client_type if task.client_type in config_by_type else client_configs[0].type
+            client_config = config_by_type.get(client_type)
+            client_id = _client_download_key(task)
+
+            if client_config is None or not client_id:
+                if stale:
+                    _mark_download_reconciliation_failed(
+                        task,
+                        f"Usenet task cannot resolve its {client_type or 'configured'} client",
+                        client_state="missing-client",
+                    )
+                    updated += 1
                 continue
 
-            if task.info_hash in download_map:
-                download = download_map[task.info_hash]
+            if client_type not in clients:
+                client = _build_usenet_client(client_config)
+                if not client.test_connection():
+                    logger.error("sync_usenet_connection_failed", client_type=client_type)
+                    clients[client_type] = None
+                else:
+                    clients[client_type] = client
+            client = clients[client_type]
+            if client is None:
+                continue
 
-                # Map NZBGet state to our state
-                old_state = task.state
-                old_client_state = task.client_state
+            old_state = task.state
+            old_client_state = task.client_state
+            status = client.get_download_status(client_id)
+            state = _download_state_name(status.get('state'))
 
-                nzbget_state = download['state']
-                if nzbget_state in ['ERROR', 'FAILED']:
-                    task.state = 'error'
-                    task.message = download.get('message', 'NZBGet error')
-                elif nzbget_state == 'PAUSED':
-                    task.state = 'paused'
-                elif nzbget_state == 'QUEUED':
-                    task.state = 'queued'
-                elif nzbget_state == 'DOWNLOADING':
-                    task.state = 'downloading'
-                elif nzbget_state in ['POST_PROCESSING', 'EXTRACTING']:
-                    task.state = 'checking'
-                elif nzbget_state == 'SUCCESS':
-                    task.state = 'complete'
-                    if not task.completed_at:
-                        task.completed_at = datetime.now(timezone.utc)
+            if state == 'error':
+                _mark_download_reconciliation_failed(
+                    task,
+                    status.get('message') or status.get('fail_message') or f"{client_type} download failed",
+                    client_state='error',
+                )
+            elif state == 'complete':
+                task.state = 'complete'
+                if not task.completed_at:
+                    task.completed_at = now
+            elif state in ('processing', 'checking'):
+                task.state = 'checking'
+            elif state == 'paused':
+                task.state = 'paused'
+            elif state == 'queued':
+                task.state = 'queued'
+            else:
+                task.state = 'downloading'
 
-                # Update client_state and progress
-                task.client_state = nzbget_state
-                task.progress = download['progress']
+            task.client_state = state
+            task.progress = float(status.get('progress') or 0)
 
-                if old_state != task.state or old_client_state != task.client_state:
-                    logger.info("sync_usenet_updated",
-                               task_id=task.id,
-                               old_state=old_state,
-                               new_state=task.state,
-                               old_client_state=old_client_state,
-                               new_client_state=task.client_state,
-                               progress=task.progress)
+            if old_state != task.state or old_client_state != task.client_state:
+                logger.info("sync_usenet_updated",
+                           task_id=task.id,
+                           client_type=client_type,
+                           old_state=old_state,
+                           new_state=task.state,
+                           old_client_state=old_client_state,
+                           new_client_state=task.client_state,
+                           progress=task.progress)
+                updated += 1
+
+            if task.state == 'complete' and stale and task.import_status != 'imported':
+                if _recover_completed_download(db, task, client, client_id):
                     updated += 1
 
         db.commit()
@@ -1515,6 +1557,135 @@ async def _sync_usenet_downloads(db: Session, tasks: list) -> int:
     except Exception as e:
         logger.error("sync_usenet_error", error=str(e))
         return 0
+
+
+def _client_download_key(task) -> Optional[str]:
+    """Return the real download-client identifier, with a legacy torrent fallback."""
+    if task.client_download_id:
+        return str(task.client_download_id)
+    if task.protocol == 'torrent' and task.info_hash and len(task.info_hash) == 40:
+        return str(task.info_hash)
+    return None
+
+
+def _task_is_stale(task, now: datetime, after: timedelta = timedelta(minutes=10)) -> bool:
+    last_touch = task.updated_at or task.started_at or task.created_at
+    if last_touch is None:
+        return True
+    if last_touch.tzinfo is None:
+        last_touch = last_touch.replace(tzinfo=timezone.utc)
+    return now - last_touch >= after
+
+
+def _torrent_stalled_too_long(torrent, now: datetime, after: timedelta = timedelta(hours=24)) -> bool:
+    last_activity = getattr(torrent, 'last_activity', None)
+    if not last_activity or int(last_activity) <= 0:
+        return False
+    return now - datetime.fromtimestamp(int(last_activity), tz=timezone.utc) >= after
+
+
+def _download_state_name(state) -> str:
+    return str(getattr(state, 'value', state) or '').lower()
+
+
+def _build_usenet_client(config):
+    if config.type == 'sabnzbd':
+        from app.downloads.clients.sabnzbd import SabnzbdClient
+        return SabnzbdClient(
+            host=config.host,
+            port=config.port,
+            api_key=config.api_key or config.password,
+            use_ssl=config.use_ssl,
+            url_base=config.url_base,
+            category=config.category,
+        )
+    if config.type == 'nzbget':
+        from app.downloads.clients.nzbget import NZBGetClient
+        return NZBGetClient(
+            host=config.host,
+            port=config.port,
+            username=config.username,
+            password=config.password,
+            use_ssl=config.use_ssl,
+            url_base=config.url_base,
+            category=config.category,
+        )
+    raise ValueError(f"Unsupported Usenet client type: {config.type}")
+
+
+def _mark_download_reconciliation_failed(task, message: str, client_state: str) -> None:
+    task.state = 'error'
+    task.client_state = client_state
+    task.message = message
+    logger.error(
+        "download_reconciliation_failed",
+        task_id=task.id,
+        book_id=task.book_id,
+        format=task.format,
+        protocol=task.protocol,
+        client_type=task.client_type,
+        reason=message,
+    )
+
+
+def _recover_completed_download(db: Session, task, client, client_id: str) -> bool:
+    from app.downloads.orchestrator import DownloadOrchestrator
+
+    try:
+        source_path = client.get_completed_download_path(client_id)
+        if not source_path:
+            task.import_status = 'failed'
+            task.import_message = 'Download completed, but the client returned no source path'
+            db.commit()
+            logger.error(
+                "download_reconciliation_failed",
+                task_id=task.id,
+                book_id=task.book_id,
+                format=task.format,
+                protocol=task.protocol,
+                reason=task.import_message,
+            )
+            return False
+
+        orchestrator = DownloadOrchestrator(db_session=db)
+        destination = orchestrator._copy_to_destination(task, source_path, db)
+        if not destination or task.import_status != 'imported':
+            logger.error(
+                "download_reconciliation_failed",
+                task_id=task.id,
+                book_id=task.book_id,
+                format=task.format,
+                protocol=task.protocol,
+                reason=task.import_message or 'Import did not complete',
+            )
+            return False
+
+        task.download_path = destination
+        task.final_path = destination
+        orchestrator._update_book_availability(task, db)
+        db.commit()
+        logger.info(
+            "download_reconciliation_recovered",
+            task_id=task.id,
+            book_id=task.book_id,
+            format=task.format,
+            destination=destination,
+        )
+        return True
+    except Exception as exc:
+        db.rollback()
+        task.import_status = 'failed'
+        task.import_message = f'Import recovery failed: {exc}'
+        db.commit()
+        logger.error(
+            "download_reconciliation_failed",
+            task_id=task.id,
+            book_id=task.book_id,
+            format=task.format,
+            protocol=task.protocol,
+            reason=str(exc),
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------

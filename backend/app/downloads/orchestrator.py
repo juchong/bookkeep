@@ -22,7 +22,7 @@ from . import (
     list_sources,
     list_handlers,
 )
-from ..models import Book, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
+from ..models import Book, BookRequest, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
 from ..database import SessionLocal
 
 logger = structlog.get_logger()
@@ -455,13 +455,16 @@ class DownloadOrchestrator:
             setting = db.query(AppSettings).filter(AppSettings.key == setting_key).first()
 
             if not setting or not setting.value:
-                logger.warning(
+                task.import_status = 'failed'
+                task.import_message = f'No destination path configured for {task.format}'
+                db.commit()
+                logger.error(
                     "orchestrator_no_destination_configured",
                     task_id=task.id,
                     format=task.format,
-                    message=f"No destination path configured for {task.format}. Files will remain in download client location."
+                    message=task.import_message,
                 )
-                return source_path
+                return None
 
             dest_base = setting.value
             if not os.path.exists(dest_base):
@@ -620,6 +623,14 @@ class DownloadOrchestrator:
             db: Database session
         """
         try:
+            if task.import_status != "imported":
+                logger.warning(
+                    "orchestrator_availability_skipped",
+                    task_id=task.id,
+                    import_status=task.import_status,
+                )
+                return
+
             book = db.query(Book).filter(Book.id == task.book_id).first()
             if not book:
                 return
@@ -657,6 +668,15 @@ class DownloadOrchestrator:
 
             book.downloaded_release_hashes = json.dumps(hashes)
 
+            requests = db.query(BookRequest).filter(
+                BookRequest.book_id == task.book_id,
+                BookRequest.format == task.format,
+                BookRequest.status.in_(("pending", "approved", "processing", "not_found")),
+            ).all()
+            for request in requests:
+                request.status = "available"
+                request.updated_at = datetime.now(timezone.utc)
+
             db.commit()
 
             logger.info(
@@ -664,7 +684,8 @@ class DownloadOrchestrator:
                 book_id=book.id,
                 format=task.format,
                 available=True,
-                hash_stored=task.info_hash is not None
+                hash_stored=task.info_hash is not None,
+                request_ids=[request.id for request in requests],
             )
 
         except Exception as e:

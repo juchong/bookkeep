@@ -223,7 +223,8 @@ export default function Downloads() {
       const data = query.state.data;
       if (!data) return 5000; // poll until first fetch completes
       const hasActive = data.some((t: DownloadTask) =>
-        ['queued', 'downloading', 'checking'].includes(t.state)
+        ['queued', 'downloading', 'checking'].includes(t.state) ||
+        (['complete', 'seeding'].includes(t.state) && !['imported', 'failed'].includes(t.import_status || 'pending'))
       );
       return hasActive ? 5000 : false;
     },
@@ -340,16 +341,17 @@ export default function Downloads() {
     ['queued', 'downloading', 'checking'].includes(t.state)
   ), [tasks]);
 
-  const completedTasks = useMemo(() => tasks.filter(t =>
-    ['complete', 'seeding'].includes(t.state)
+  const awaitingImportTasks = useMemo(() => tasks.filter(t =>
+    ['complete', 'seeding'].includes(t.state) &&
+    !['imported', 'failed'].includes(t.import_status || 'pending')
   ), [tasks]);
 
   const failedTasks = useMemo(() => tasks.filter(t =>
-    t.state === 'error'
+    t.state === 'error' || t.import_status === 'failed'
   ), [tasks]);
 
   const importedTasks = useMemo(() => tasks.filter(t =>
-    t.import_status === 'imported'
+    ['complete', 'seeding'].includes(t.state) && t.import_status === 'imported'
   ), [tasks]);
 
   // Watch for newly completed downloads and invalidate book queries
@@ -358,6 +360,7 @@ export default function Downloads() {
 
     const newlyCompleted = tasks.filter((t: DownloadTask) =>
       ['complete', 'seeding'].includes(t.state) &&
+      t.import_status === 'imported' &&
       !completedTasksRef.current.has(t.id)
     );
 
@@ -384,7 +387,7 @@ export default function Downloads() {
 
       // Show notification
       toast.success('Download completed!', {
-        description: `${newlyCompleted[0].release_title || 'Book'} is now available`,
+        description: `${newlyCompleted[0].release_title || 'Book'} was imported and is now available`,
       });
     }
   }, [tasks, queryClient]);
@@ -412,16 +415,16 @@ export default function Downloads() {
         <div className="bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-muted-foreground">Completed</p>
-              <p className="text-2xl font-bold text-foreground">{completedTasks.length}</p>
+              <p className="text-sm text-muted-foreground">Awaiting Import</p>
+              <p className="text-2xl font-bold text-foreground">{awaitingImportTasks.length}</p>
             </div>
-            <CheckCircle className="h-8 w-8 text-green-500" />
+            <FolderInput className="h-8 w-8 text-amber-500" />
           </div>
         </div>
         <div className="bg-card border border-border rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-muted-foreground">Imported</p>
+              <p className="text-sm text-muted-foreground">Available</p>
               <p className="text-2xl font-bold text-foreground">{importedTasks.length}</p>
             </div>
             <FolderInput className="h-8 w-8 text-purple-500" />

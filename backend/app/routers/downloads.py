@@ -586,12 +586,9 @@ async def import_download(
             release_hash = compute_release_hash(task.download_url)
             add_release_hash_to_book(db, task.book_id, release_hash)
 
-            # Mark book as available now that import succeeded
-            if book:
-                if task.format == "ebook":
-                    book.ebook_available = True
-                elif task.format == "audiobook":
-                    book.audiobook_available = True
+            # Availability and matching request state move together only after
+            # the importer has recorded success.
+            orchestrator._update_book_availability(task, db)
 
             # Keep the task in history instead of deleting
             db.commit()

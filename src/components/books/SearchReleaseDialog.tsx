@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Download, Search, HardDrive, Wifi, BookOpen, Headphones, CheckCircle, RefreshCw, XCircle, ExternalLink, Globe } from 'lucide-react';
+import { Download, Search, HardDrive, Wifi, BookOpen, Headphones, CheckCircle, RefreshCw, XCircle, ExternalLink, Globe, FolderInput } from 'lucide-react';
 import { DirectDownloadProgress } from '@/components/books/DirectDownloadProgress';
 import { Progress } from '@/components/ui/progress';
 import { downloadsApi, ReleaseInfo, booksApi, directDownloadApi } from '@/lib/api';
@@ -185,8 +185,12 @@ export function SearchReleaseDialog({
         // Use loose equality to handle number vs string
         if (task.book_id == bookId && task.download_url) {
           // Set state based on task state
-          if (['complete', 'seeding'].includes(task.state)) {
+          if (['complete', 'seeding'].includes(task.state) && task.import_status === 'imported') {
             newMap.set(task.download_url, 'complete');
+          } else if (task.state === 'error' || task.import_status === 'failed') {
+            newMap.set(task.download_url, 'failed');
+          } else if (['complete', 'seeding'].includes(task.state)) {
+            newMap.set(task.download_url, 'awaiting_import');
           } else if (['queued', 'downloading', 'checking'].includes(task.state)) {
             newMap.set(task.download_url, 'downloading');
           }
@@ -260,6 +264,7 @@ export function SearchReleaseDialog({
 
     const completedTasks = downloadTasks.filter((t: any) =>
       ['complete', 'seeding'].includes(t.state) &&
+      t.import_status === 'imported' &&
       t.book_id == bookId &&  // Use loose equality
       !completedTasksRef.current.has(t.id)
     );
@@ -289,7 +294,7 @@ export function SearchReleaseDialog({
 
       // Show success notification
       toast.success('Download completed!', {
-        description: `${completedTasks[0].release_title} is now available`,
+        description: `${completedTasks[0].release_title} was imported and is now available`,
       });
     }
   }, [downloadTasks, bookId, queryClient]);
@@ -403,8 +408,9 @@ export function SearchReleaseDialog({
           // Determine current state
           const isPending = downloadState === 'pending';
           const isDownloading = downloadState === 'downloading' || (task && ['queued', 'downloading', 'checking'].includes(task.state));
-          const isComplete = downloadState === 'complete' || (task && ['complete', 'seeding'].includes(task.state));
-          const isFailed = task && task.state === 'error';
+          const isComplete = downloadState === 'complete' || (task && ['complete', 'seeding'].includes(task.state) && task.import_status === 'imported');
+          const isAwaitingImport = task && ['complete', 'seeding'].includes(task.state) && !['imported', 'failed'].includes(task.import_status || 'pending');
+          const isFailed = task && (task.state === 'error' || task.import_status === 'failed');
 
           // Check if this format type is already available for the book (only used for badge)
           const isBookAvailable = formatType === 'ebook'
@@ -509,16 +515,11 @@ export function SearchReleaseDialog({
                     <Progress value={task.progress} className="h-2" />
                   </div>
                 )
-              ) : isComplete ? (
-                <div className="flex items-center gap-2 text-sm text-green-400">
-                  <CheckCircle className="h-4 w-4" />
-                  <span>Download Complete</span>
-                </div>
               ) : isFailed ? (
                 <div className="space-y-2">
                   <div className="flex items-center gap-2 text-sm text-red-400">
                     <XCircle className="h-4 w-4" />
-                    <span>{task?.protocol === 'direct' && task?.message ? task.message : 'Download Failed'}</span>
+                    <span>{task?.import_status === 'failed' ? task.import_message || 'Import Failed' : task?.protocol === 'direct' && task?.message ? task.message : 'Download Failed'}</span>
                   </div>
                   <Button
                     size="sm"
@@ -530,6 +531,16 @@ export function SearchReleaseDialog({
                     <Download className="h-4 w-4 mr-2" />
                     Retry
                   </Button>
+                </div>
+              ) : isAwaitingImport ? (
+                <div className="flex items-center gap-2 text-sm text-amber-400">
+                  <FolderInput className="h-4 w-4" />
+                  <span>{task.import_status === 'importing' ? 'Importing to library' : 'Awaiting library import'}</span>
+                </div>
+              ) : isComplete ? (
+                <div className="flex items-center gap-2 text-sm text-green-400">
+                  <CheckCircle className="h-4 w-4" />
+                  <span>Imported and Available</span>
                 </div>
               ) : release.already_downloaded || isBookAvailable ? (
                 <div className="flex items-center gap-2">
