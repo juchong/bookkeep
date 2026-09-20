@@ -40,10 +40,14 @@ query BookkeepMetadataByIds($ids: [Int!]!) {
     default_ebook_edition_id
     default_audio_edition_id
     default_physical_edition_id
+    default_cover_edition_id
     editions(limit: 25, order_by: {score: desc_nulls_last}) {
       id
       isbn_10
       isbn_13
+      release_date
+      release_year
+      score
     }
     book_series {
       position
@@ -172,6 +176,31 @@ def _select_isbn(source: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def _select_publication_date(source: Mapping[str, Any]) -> Optional[str]:
+    direct = publication_date(source.get("release_date"), source.get("release_year"))
+    if direct:
+        return direct
+
+    editions = [_as_dict(item) for item in (source.get("editions") or [])]
+    by_id = {edition.get("id"): edition for edition in editions}
+    preferred_ids = (
+        source.get("default_physical_edition_id"),
+        source.get("default_ebook_edition_id"),
+        source.get("default_audio_edition_id"),
+        source.get("default_cover_edition_id"),
+        source.get("default_edition_id"),
+    )
+    ordered = [by_id[edition_id] for edition_id in preferred_ids if edition_id in by_id]
+    ordered.extend(edition for edition in editions if edition not in ordered)
+    for edition in ordered:
+        date = publication_date(
+            edition.get("release_date"), edition.get("release_year")
+        )
+        if date:
+            return date
+    return None
+
+
 def extract_hardcover_metadata(source: Any) -> dict[str, Any]:
     """Map only fields actually present in a Hardcover response."""
     data = _as_dict(source)
@@ -201,10 +230,12 @@ def extract_hardcover_metadata(source: Any) -> dict[str, Any]:
     if "id" in data:
         mapped["hardcover_id"] = data.get("id")
 
-    if "release_date" in data or "release_year" in data:
-        mapped["published_date"] = publication_date(
-            data.get("release_date"), data.get("release_year")
-        )
+    if "release_date" in data or "release_year" in data or "editions" in data:
+        mapped["published_date"] = _select_publication_date(data)
+        if not mapped.get("release_year") and mapped["published_date"]:
+            year = mapped["published_date"][:4]
+            if year.isdigit():
+                mapped["release_year"] = int(year)
 
     if "cached_image" in data:
         image = _as_dict(data.get("cached_image"))

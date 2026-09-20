@@ -39,6 +39,22 @@ def test_extractor_distinguishes_omitted_and_explicit_null_date():
     )["published_date"] is None
 
 
+def test_extractor_falls_back_to_preferred_edition_date():
+    metadata = extract_hardcover_metadata({
+        "id": 1,
+        "release_date": None,
+        "release_year": None,
+        "default_cover_edition_id": 20,
+        "editions": [
+            {"id": 10, "release_date": "2023-01-01", "release_year": 2023},
+            {"id": 20, "release_date": "2022-12-27", "release_year": None},
+        ],
+    })
+
+    assert metadata["published_date"] == "2022-12-27"
+    assert metadata["release_year"] == 2022
+
+
 def test_partial_payload_cannot_erase_existing_metadata():
     book = make_book()
     apply_hardcover_metadata(
