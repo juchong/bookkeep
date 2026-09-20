@@ -16,6 +16,7 @@ from app.database import SessionLocal, engine, Base
 from app.models import Book, Series
 from app.routers.hardcover import execute_graphql
 from app.routers.settings import get_hardcover_token
+from app.services.hardcover_metadata import upsert_hardcover_book
 import structlog
 from pathlib import Path
 
@@ -203,63 +204,6 @@ async def fetch_popular_books(total_limit: int = 5000):
     logger.info(f"Fetched {len(all_books)} unique books total")
     return all_books
 
-def transform_to_db_book(hc_book: dict) -> dict:
-    """Transform Hardcover book to database Book model"""
-    authors = []
-    author_id = None
-    if hc_book.get("contributions"):
-        authors = [c["author"]["name"] for c in hc_book["contributions"] if c.get("author", {}).get("name")]
-        # Extract first author's ID from contributions
-        if hc_book["contributions"] and hc_book["contributions"][0].get("author", {}).get("id"):
-            author_id = hc_book["contributions"][0]["author"]["id"]
-    elif hc_book.get("cached_contributors"):
-        authors = [c.get("author", {}).get("name") or c.get("name", "") for c in hc_book["cached_contributors"]]
-    
-    author = ", ".join(authors) if authors else "Unknown Author"
-    
-    # Extract cover URL
-    cover_url = None
-    if isinstance(hc_book.get("cached_image"), dict):
-        cover_url = hc_book["cached_image"].get("url")
-    
-    # Extract series info
-    series = None
-    series_id = None
-    series_position = None
-    if hc_book.get("book_series") and len(hc_book["book_series"]) > 0:
-        series_info = hc_book["book_series"][0].get("series", {})
-        series = series_info.get("name")
-        series_id = series_info.get("id")
-        series_position = hc_book["book_series"][0].get("position")
-    
-    # Extract genres
-    genres = []
-    if hc_book.get("taggings"):
-        genres = [t["tag"]["tag"] for t in hc_book["taggings"] if t.get("tag", {}).get("tag")]
-    
-    return {
-        "title": hc_book.get("title", "Unknown"),
-        "author": author,
-        "author_id": author_id,  # Store author ID
-        "description": hc_book.get("description"),
-        "cover_url": cover_url,
-        "published_date": hc_book.get("release_date") or str(hc_book.get("release_year", "")),
-        "rating": hc_book.get("rating"),
-        "page_count": hc_book.get("pages"),
-        "hardcover_id": hc_book.get("id"),
-        "hardcover_slug": hc_book.get("slug"),
-        "series": series,
-        "series_id": series_id,
-        "series_position": series_position,
-        "genres": ", ".join(genres) if genres else None,
-        "ratings_count": hc_book.get("ratings_count"),
-        "users_count": hc_book.get("users_count"),
-        "activities_count": hc_book.get("activities_count"),
-        "release_year": hc_book.get("release_year"),
-        "is_seed_data": True,
-        "last_refreshed": datetime.now(),
-    }
-
 async def seed_database():
     """Main seed function"""
     db: Session = SessionLocal()
@@ -286,23 +230,11 @@ async def seed_database():
                 skipped += 1
                 continue
             
-            # Check if book already exists
-            existing = db.query(Book).filter(Book.hardcover_id == hardcover_id).first()
-            
-            book_data = transform_to_db_book(hc_book)
-            
-            if existing:
-                # Update existing book
-                for key, value in book_data.items():
-                    setattr(existing, key, value)
-                existing.is_seed_data = True
-                existing.last_refreshed = datetime.now()
-                updated += 1
-            else:
-                # Create new book
-                db_book = Book(**book_data)
-                db.add(db_book)
-                inserted += 1
+            _, created, _ = upsert_hardcover_book(
+                db, hc_book, authoritative=False, is_seed_data=True
+            )
+            inserted += int(created)
+            updated += int(not created)
         
         db.commit()
         logger.info(
@@ -414,4 +346,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

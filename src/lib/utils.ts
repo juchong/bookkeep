@@ -14,3 +14,11 @@ export function formatRating(rating: number | null | undefined): string {
   }
   return rating.toFixed(2);
 }
+
+export function formatPublicationYear(value: string | null | undefined): string {
+  if (!value || ["none", "null", "nan", "undefined"].includes(value.trim().toLowerCase())) {
+    return "Unknown";
+  }
+  const year = new Date(value).getFullYear();
+  return Number.isNaN(year) ? "Unknown" : String(year);
+}

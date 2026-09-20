@@ -62,6 +62,8 @@ class Book(Base):
     ebook_available = Column(Boolean, default=False)  # Ebook is available in library
     audiobook_available = Column(Boolean, default=False)  # Audiobook is available in library
     last_refreshed = Column(DateTime(timezone=True), nullable=True)
+    hardcover_metadata_status = Column(String, nullable=True, index=True)
+    hardcover_metadata_checked_at = Column(DateTime(timezone=True), nullable=True)
     # Track downloaded release hashes (JSON array of hashes) for duplicate detection
     downloaded_release_hashes = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

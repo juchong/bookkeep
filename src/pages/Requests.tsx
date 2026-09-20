@@ -3,7 +3,7 @@ import { Clock, CheckCircle, XCircle, Loader2, Trash2, User, CheckCircle2, Libra
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
+import { cn, formatPublicationYear } from '@/lib/utils';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { requestsApi } from '@/lib/api';
 import { toast } from 'sonner';
@@ -122,11 +122,9 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
               className="w-full h-full object-cover transition-transform duration-300 group-hover/cover:scale-105"
             />
           </div>
-          {request.book.publishedDate && (
-            <p className="text-xs text-muted-foreground/60 mt-2 text-center font-medium">
-              {new Date(request.book.publishedDate).getFullYear()}
-            </p>
-          )}
+          <p className="text-xs text-muted-foreground/60 mt-2 text-center font-medium">
+            {formatPublicationYear(request.book.publishedDate)}
+          </p>
         </div>
 
         {/* Book info */}

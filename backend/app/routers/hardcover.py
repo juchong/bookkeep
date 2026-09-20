@@ -12,6 +12,11 @@ from sqlalchemy import func, or_
 from app import schemas, cache, database, models
 from app.models import Book, Series
 from app.auth import require_admin
+from app.services.hardcover_metadata import (
+    HARDCOVER_BOOKS_BY_IDS_QUERY,
+    publication_date,
+    upsert_hardcover_book,
+)
 
 logger = structlog.get_logger()
 
@@ -250,7 +255,7 @@ def _parse_hardcover_book(book_data: dict) -> schemas.HardcoverBook:
             taggings=None,
         )
 
-def _save_book_to_db(book_data: dict, db: Session) -> Optional[Book]:
+def _save_book_to_db_legacy(book_data: dict, db: Session) -> Optional[Book]:
     """Save a book from API response to database"""
     hardcover_id = book_data.get("id")
     if not hardcover_id:
@@ -319,7 +324,9 @@ def _save_book_to_db(book_data: dict, db: Session) -> Optional[Book]:
         existing.author_id = author_id  # Store author ID
         existing.description = book_data.get("description")
         existing.cover_url = cover_url
-        existing.published_date = book_data.get("release_date") or str(book_data.get("release_year", ""))
+        existing.published_date = publication_date(
+            book_data.get("release_date"), book_data.get("release_year")
+        )
         existing.rating = book_data.get("rating")
         existing.page_count = book_data.get("pages")
         existing.hardcover_slug = book_data.get("slug")
@@ -410,7 +417,9 @@ def _save_book_to_db(book_data: dict, db: Session) -> Optional[Book]:
         "author_id": author_id,  # Store author ID
         "description": book_data.get("description"),
         "cover_url": cover_url,
-        "published_date": book_data.get("release_date") or str(book_data.get("release_year", "")),
+        "published_date": publication_date(
+            book_data.get("release_date"), book_data.get("release_year")
+        ),
         "rating": book_data.get("rating"),
         "page_count": book_data.get("pages"),
         "hardcover_id": hardcover_id,
@@ -557,6 +566,40 @@ def _save_book_to_db(book_data: dict, db: Session) -> Optional[Book]:
         logger.warning("failed_to_save_book_to_db", book_id=hardcover_id, error=str(e), error_type=str(type(e)))
         db.rollback()
         return None
+
+
+def _save_book_to_db(
+    book_data: dict,
+    db: Session,
+    *,
+    authoritative: bool = False,
+) -> Optional[Book]:
+    """Persist Hardcover data through the canonical field-aware reconciler."""
+    hardcover_id = book_data.get("id")
+    if not hardcover_id:
+        return None
+    try:
+        book, _, confidence = upsert_hardcover_book(
+            db, book_data, authoritative=authoritative
+        )
+        db.commit()
+        db.refresh(book)
+        logger.debug(
+            "hardcover_book_reconciled",
+            book_id=hardcover_id,
+            confidence=confidence,
+            authoritative=authoritative,
+        )
+        return book
+    except Exception as exc:
+        db.rollback()
+        logger.warning(
+            "failed_to_reconcile_hardcover_book",
+            book_id=hardcover_id,
+            error=str(exc),
+        )
+        return db.query(Book).filter(Book.hardcover_id == hardcover_id).first()
+
 
 def _ensure_series_fields(db_book: Book, series_id: Optional[int], series_name: Optional[str], position: Optional[float], db: Session) -> None:
     """Ensure series fields are populated even when the book payload lacks book_series."""
@@ -954,6 +997,26 @@ async def search_books(
         
         # Extract documents from hits and limit to requested number
         hits = hits[:limit]
+        ordered_ids = [
+            int(hit.get("document", {}).get("id"))
+            for hit in hits
+            if hit.get("document", {}).get("id")
+        ]
+        hydrated_books_data = []
+        if ordered_ids:
+            details_result = await execute_graphql(
+                HARDCOVER_BOOKS_BY_IDS_QUERY, {"ids": ordered_ids}, db=db
+            )
+            details_by_id = {
+                int(book["id"]): book
+                for book in details_result.get("books", [])
+                if book.get("id")
+            }
+            hydrated_books_data = [
+                details_by_id[book_id]
+                for book_id in ordered_ids
+                if book_id in details_by_id
+            ]
         
         # Transform search document structure to match regular book structure
         books_data = []
@@ -1019,6 +1082,11 @@ async def search_books(
                 continue
             
             books_data.append(book_data)
+
+        # Search documents omit publication and edition metadata. Persist and return
+        # hydrated records whenever Hardcover supplied them.
+        if hydrated_books_data:
+            books_data = hydrated_books_data
         
         if not books_data:
             logger.info("search_no_valid_books", query=query)
@@ -1029,7 +1097,9 @@ async def search_books(
         
         # Save ALL results to database first
         for book_data in books_data:
-            _save_book_to_db(book_data, db)
+            _save_book_to_db(
+                book_data, db, authoritative=bool(hydrated_books_data)
+            )
         
         # Enrich with local availability data
         books = _enrich_books_with_availability(books, db)
@@ -1177,6 +1247,8 @@ async def search_grouped(
             """
             books_result = await execute_graphql(books_query, {"ids": ordered_ids}, db=db)
             books_data = books_result.get("books", [])
+            for book_data in books_data:
+                _save_book_to_db(book_data, db)
             hardcover_books = [_parse_hardcover_book(book) for book in books_data]
             hardcover_books = _enrich_books_with_availability(hardcover_books, db)
     except Exception as e:

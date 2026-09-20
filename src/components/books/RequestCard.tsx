@@ -2,7 +2,7 @@ import { memo } from 'react';
 import { Link } from 'react-router-dom';
 import { User } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
+import { cn, formatPublicationYear } from '@/lib/utils';
 import type { BookRequest } from '@/types/book';
 
 interface RequestCardProps {
@@ -21,7 +21,7 @@ const statusConfig: Record<string, { label: string; className: string }> = {
 
 export const RequestCard = memo(function RequestCard({ request }: RequestCardProps) {
   const status = statusConfig[request.status] || { label: request.status, className: 'status-requested' };
-  const year = new Date(request.book.publishedDate).getFullYear();
+  const year = formatPublicationYear(request.book.publishedDate);
   const bookIdentifier =
     request.book.hardcoverId || request.book.hardcoverSlug || request.bookId;
 

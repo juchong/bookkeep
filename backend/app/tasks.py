@@ -5,13 +5,18 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func as sa_func
+from sqlalchemy import and_, case, or_, func as sa_func
 from app.database import SessionLocal
 from app.models import Book
-from app import schemas
-from app.routers.hardcover import execute_graphql, _parse_hardcover_book
+from app.routers.hardcover import execute_graphql
 from app.routers.settings import get_hardcover_token
 from app.downloads.orchestrator import _payload_matches_book
+from app.services.hardcover_metadata import (
+    HARDCOVER_BOOKS_BY_IDS_QUERY,
+    clean_text,
+    publication_date,
+    upsert_hardcover_book,
+)
 import structlog
 
 logger = structlog.get_logger()
@@ -172,63 +177,20 @@ async def refresh_seed_data():
                 skipped += 1
                 continue
             
-            # Parse book
             try:
-                hc_book = _parse_hardcover_book(hc_book_data)
+                with db.begin_nested():
+                    _, created, _ = upsert_hardcover_book(
+                        db,
+                        hc_book_data,
+                        authoritative=False,
+                        is_seed_data=True,
+                    )
             except Exception as e:
-                logger.debug("refresh_seed_data_parse_error", hardcover_id=hardcover_id, error=str(e))
+                logger.debug("refresh_seed_data_save_error", hardcover_id=hardcover_id, error=str(e))
                 continue
-            
-            # Extract data
-            authors = []
-            if hc_book.contributions:
-                authors = [c.author.name for c in hc_book.contributions if c.author]
-            elif hc_book.cached_contributors:
-                authors = [c.author.get("name", "") if isinstance(c.author, dict) else "" for c in hc_book.cached_contributors]
-            
-            author = ", ".join(authors) if authors else "Unknown Author"
-            
-            cover_url = None
-            if hc_book.cached_image and isinstance(hc_book.cached_image, schemas.HardcoverCachedImage):
-                cover_url = hc_book.cached_image.url
-            
-            series = None
-            series_id = None
-            series_position = None
-            if hc_book.book_series and len(hc_book.book_series) > 0:
-                series = hc_book.book_series[0].series.name
-                series_id = hc_book.book_series[0].series.id
-                series_position = hc_book.book_series[0].position
-            
-            genres = []
-            if hc_book.taggings:
-                genres = [t.tag.tag for t in hc_book.taggings if t.tag]
-            
-            # Create new book
-            db_book = Book(
-                title=hc_book.title,
-                author=author,
-                description=hc_book.description,
-                cover_url=cover_url,
-                published_date=hc_book.release_date or str(hc_book.release_year or ""),
-                rating=hc_book.rating,
-                page_count=hc_book.pages,
-                hardcover_id=hardcover_id,
-                hardcover_slug=hc_book.slug,
-                series=series,
-                series_id=series_id,
-                series_position=series_position,
-                genres=", ".join(genres) if genres else None,
-                ratings_count=hc_book.ratings_count,
-                users_count=hc_book.users_count,
-                activities_count=hc_book.activities_count,
-                release_year=hc_book.release_year,
-                is_seed_data=True,
-                last_refreshed=datetime.now(timezone.utc),
-            )
-            db.add(db_book)
+
             existing_ids.add(hardcover_id)  # Track to avoid duplicates in same batch
-            inserted += 1
+            inserted += int(created)
         
         # Update offset for next run
         new_offset = current_offset + batch_size
@@ -542,7 +504,10 @@ async def sync_from_booklore():
                 cached_image = hardcover_book_data.get("cached_image")
                 cover_url = cached_image.get("url") if isinstance(cached_image, dict) else None
                 page_count = hardcover_book_data.get("pages") or metadata.get("pageCount")
-                published_date = hardcover_book_data.get("release_date") or str(hardcover_book_data.get("release_year", "")) or str(metadata.get("publishedDate") or "")
+                published_date = publication_date(
+                    hardcover_book_data.get("release_date"),
+                    hardcover_book_data.get("release_year"),
+                ) or clean_text(metadata.get("publishedDate"))
                 rating = hardcover_book_data.get("rating")
                 ratings_count = hardcover_book_data.get("ratings_count")
                 users_count = hardcover_book_data.get("users_count")
@@ -787,6 +752,13 @@ async def sync_from_booklore():
                                  author=author)
                     skipped_count += 1
                     continue
+
+            if hardcover_book_data:
+                # Apply all Hardcover-owned fields through the canonical mapper;
+                # Booklore identifiers and availability remain locally owned.
+                db_book, _, _ = upsert_hardcover_book(
+                    db, hardcover_book_data, authoritative=False
+                )
             
             # Check if we have an existing request for this book matching the format
             # Update to "available" if the book is now in Booklore
@@ -962,6 +934,10 @@ async def sync_from_audiobookshelf():
                     await asyncio.sleep(0.5)
 
                     if hardcover_data:
+                        db_book, created, _ = upsert_hardcover_book(
+                            db, hardcover_data, authoritative=False
+                        )
+                        books_created += int(created)
                         hardcover_id_int = hardcover_data.get("id")
                         if hardcover_id_int:
                             db_book = db.query(Book).filter(Book.hardcover_id == hardcover_id_int).first()
@@ -972,7 +948,10 @@ async def sync_from_audiobookshelf():
                                 cached_image = hardcover_data.get("cached_image")
                                 cover_url = cached_image.get("url") if isinstance(cached_image, dict) else None
                                 page_count = hardcover_data.get("pages")
-                                published_date = hardcover_data.get("release_date") or str(hardcover_data.get("release_year", ""))
+                                published_date = publication_date(
+                                    hardcover_data.get("release_date"),
+                                    hardcover_data.get("release_year"),
+                                )
                                 rating = hardcover_data.get("rating")
                                 hardcover_slug = hardcover_data.get("slug")
 
@@ -1044,6 +1023,13 @@ async def sync_from_audiobookshelf():
             # Update existing book
             if item_id:
                 db_book.audiobookshelf_id = item_id
+            if isbn and not db_book.isbn:
+                isbn_conflict = db.query(Book.id).filter(
+                    Book.isbn == isbn,
+                    Book.id != db_book.id,
+                ).first()
+                if not isbn_conflict:
+                    db_book.isbn = isbn
             db_book.audiobook_available = True
             db_book.last_refreshed = datetime.now(timezone.utc)
             db.add(db_book)
@@ -1127,7 +1113,7 @@ def get_job_interval(job_name: str, db: Session) -> int:
     return defaults.get(job_name, 3600)
 
 
-async def sync_missing_metadata():
+async def _sync_missing_metadata_legacy():
     """
     Find books in the database that are missing metadata (no hardcover_id, 
     no cover, no rating, etc.) and look them up on Hardcover.
@@ -1288,6 +1274,99 @@ async def sync_missing_metadata():
     except Exception as e:
         logger.error("sync_missing_metadata_error", error=str(e))
         db.rollback()
+    finally:
+        db.close()
+
+
+async def sync_missing_metadata(batch_size: int = 100) -> dict[str, int]:
+    """Reconcile one resumable batch against authoritative Hardcover data."""
+    db: Session = SessionLocal()
+    summary = {"selected": 0, "synced": 0, "alias": 0, "review": 0, "failed": 0}
+    try:
+        now = datetime.now(timezone.utc)
+        stale_before = now - timedelta(days=30)
+        books = (
+            db.query(Book)
+            .filter(
+                Book.hardcover_id.isnot(None),
+                or_(
+                    Book.hardcover_metadata_status.is_(None),
+                    Book.hardcover_metadata_status == "error",
+                    and_(
+                        Book.hardcover_metadata_status.in_(("synced", "alias")),
+                        Book.hardcover_metadata_checked_at < stale_before,
+                    ),
+                ),
+            )
+            .order_by(
+                case(
+                    (Book.requests.any(), 0),
+                    (
+                        or_(
+                            Book.booklore_id.isnot(None),
+                            Book.audiobookshelf_id.isnot(None),
+                        ),
+                        1,
+                    ),
+                    else_=2,
+                ),
+                Book.hardcover_metadata_checked_at.asc().nullsfirst(),
+                Book.id.asc(),
+            )
+            .limit(max(1, min(batch_size, 250)))
+            .all()
+        )
+        summary["selected"] = len(books)
+        if not books:
+            logger.info("sync_missing_metadata_skipped", reason="catalog_reconciled")
+            return summary
+
+        ids = [book.hardcover_id for book in books]
+        result = await execute_graphql(
+            HARDCOVER_BOOKS_BY_IDS_QUERY, {"ids": ids}, db=db
+        )
+        sources = {
+            int(source["id"]): source
+            for source in result.get("books", [])
+            if source.get("id")
+        }
+        if not sources:
+            summary["failed"] = len(books)
+            logger.warning("sync_missing_metadata_api_empty", books_count=len(books))
+            return summary
+
+        for book in books:
+            source = sources.get(book.hardcover_id)
+            if not source:
+                book.hardcover_metadata_status = "error"
+                book.hardcover_metadata_checked_at = now
+                summary["failed"] += 1
+                continue
+            try:
+                with db.begin_nested():
+                    _, _, confidence = upsert_hardcover_book(
+                        db, source, authoritative=True
+                    )
+                summary["synced" if confidence == "strong" else confidence] += 1
+            except Exception as exc:
+                book.hardcover_metadata_status = "error"
+                book.hardcover_metadata_checked_at = now
+                summary["failed"] += 1
+                logger.warning(
+                    "sync_missing_metadata_book_error",
+                    book_id=book.id,
+                    hardcover_id=book.hardcover_id,
+                    error=str(exc),
+                )
+
+        db.commit()
+        logger.info("sync_missing_metadata_complete", **summary)
+        return summary
+    except Exception as exc:
+        db.rollback()
+        summary["failed"] = summary["failed"] or summary["selected"]
+        logger.error("sync_missing_metadata_error", error=str(exc), **summary)
+        return summary
     finally:
         db.close()
 
@@ -2036,8 +2115,6 @@ async def _hardcover_graphql(query: str, variables: dict, token: str) -> dict:
 
 async def _ensure_book_in_db(hardcover_id: int, token: str, db: Session) -> Optional[Any]:
     """Return the local Book for a Hardcover ID, creating it from the API if needed."""
-    from app.routers.hardcover import _parse_hardcover_book
-
     existing = db.query(Book).filter(Book.hardcover_id == hardcover_id).first()
     if existing:
         return existing
@@ -2049,41 +2126,12 @@ async def _ensure_book_in_db(hardcover_id: int, token: str, db: Session) -> Opti
         return None
 
     try:
-        parsed = _parse_hardcover_book(book_data)
-    except Exception as e:
-        logger.warning("hardcover_sync_parse_failed", hardcover_id=hardcover_id, error=str(e))
-        return None
-
-    cover_url = None
-    if parsed.cached_image and isinstance(parsed.cached_image, dict):
-        cover_url = parsed.cached_image.get("url")
-
-    author = None
-    if parsed.contributions:
-        author = parsed.contributions[0].author.name if parsed.contributions else None
-
-    genres = ",".join(t.tag.tag for t in (parsed.taggings or []) if t.tag) or None
-
-    db_book = Book(
-        title=parsed.title,
-        author=author,
-        hardcover_id=parsed.id,
-        hardcover_slug=parsed.slug,
-        cover_url=cover_url,
-        description=parsed.description,
-        page_count=parsed.pages,
-        rating=parsed.rating,
-        ratings_count=parsed.ratings_count,
-        users_count=parsed.users_count,
-        genres=genres,
-        release_year=parsed.release_year,
-        is_seed_data=False,
-    )
-    db.add(db_book)
-    try:
+        db_book, _, _ = upsert_hardcover_book(
+            db, book_data, authoritative=False, is_seed_data=False
+        )
         db.commit()
         db.refresh(db_book)
-        logger.info("hardcover_sync_book_created", hardcover_id=hardcover_id, title=parsed.title)
+        logger.info("hardcover_sync_book_created", hardcover_id=hardcover_id, title=db_book.title)
         return db_book
     except Exception as e:
         db.rollback()

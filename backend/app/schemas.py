@@ -92,6 +92,14 @@ class BookBase(BaseModel):
     ebook_available: Optional[bool] = False
     audiobook_available: Optional[bool] = False
 
+    @field_validator("published_date", mode="before")
+    @classmethod
+    def normalize_published_date(cls, value):
+        if value is None:
+            return None
+        text = str(value).strip()
+        return None if text.lower() in {"", "none", "null", "nan", "undefined"} else text
+
 class BookCreate(BookBase):
     pass
 
