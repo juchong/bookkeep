@@ -126,7 +126,11 @@ def test_likely_match_preserves_local_identity_aliases():
 
 
 def test_review_match_does_not_overwrite_metadata_or_operational_state():
-    book = make_book(title="Fairy Tale", author="Stephen King")
+    book = make_book(
+        title="Fairy Tale",
+        author="Stephen King",
+        published_date="None",
+    )
     confidence = apply_hardcover_metadata(
         book,
         {
@@ -140,6 +144,7 @@ def test_review_match_does_not_overwrite_metadata_or_operational_state():
     assert confidence == "review"
     assert book.title == "Fairy Tale"
     assert book.description == "Local description"
+    assert book.published_date is None
     assert book.ebook_available is True
     assert book.downloaded_release_hashes == '["kept"]'
     assert book.hardcover_metadata_status == "review"

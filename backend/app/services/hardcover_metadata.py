@@ -317,6 +317,8 @@ def apply_hardcover_metadata(
 
     if mapping_confidence == "review":
         if authoritative:
+            if clean_text(getattr(book, "published_date", None)) is None:
+                book.published_date = None
             book.hardcover_metadata_status = "review"
             book.hardcover_metadata_checked_at = checked_at or datetime.now(timezone.utc)
         return confidence
