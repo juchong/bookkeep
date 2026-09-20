@@ -118,8 +118,9 @@ class DownloadRequest(BaseModel):
     download_url: str
     protocol: str  # "torrent", "usenet", or "direct"
     release_title: str
-    indexer: str
-    size_bytes: int
+    # Defaults keep the API aligned with clients that lack release metadata.
+    indexer: str = ""
+    size_bytes: int = 0
 
 
 class DownloadResponse(BaseModel):
