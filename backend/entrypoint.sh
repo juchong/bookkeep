@@ -13,7 +13,7 @@ fi
 export PYTHONPATH="/app/backend:$PYTHONPATH"
 
 echo "Running database migrations..."
-echo "DATABASE_URL: $DATABASE_URL"
+echo "Database backend: ${DATABASE_URL%%:*}"
 
 cd /app/backend
 
@@ -26,7 +26,7 @@ echo "Alembic current: $ALEMBIC_CURRENT"
 # This happens when the DB was bootstrapped via SQLAlchemy create_all without
 # Alembic ever having run (legacy deployments).  We detect this and stamp the
 # database at the correct revision so Alembic only runs the truly new migrations.
-if ! echo "$ALEMBIC_CURRENT" | grep -q "(head)\|Rev:"; then
+if ! echo "$ALEMBIC_CURRENT" | grep -Eq '^[[:alnum:]_-]+([[:space:]]+\([^)]*\))?$'; then
     echo "No Alembic version found. Checking whether the database already has tables..."
 
     TABLES_EXIST=$(python -c "

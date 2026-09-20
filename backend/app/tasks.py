@@ -1347,7 +1347,12 @@ async def sync_missing_metadata(batch_size: int = 100) -> dict[str, int]:
                     _, _, confidence = upsert_hardcover_book(
                         db, source, authoritative=True
                     )
-                summary["synced" if confidence == "strong" else confidence] += 1
+                summary_key = {
+                    "strong": "synced",
+                    "likely": "alias",
+                    "review": "review",
+                }[confidence]
+                summary[summary_key] += 1
             except Exception as exc:
                 book.hardcover_metadata_status = "error"
                 book.hardcover_metadata_checked_at = now

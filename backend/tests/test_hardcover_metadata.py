@@ -233,3 +233,50 @@ async def test_metadata_batch_prioritizes_request_books(monkeypatch):
         assert check.query(Book).filter(Book.hardcover_id == 1).one().hardcover_metadata_status is None
     finally:
         check.close()
+
+
+@pytest.mark.asyncio
+async def test_metadata_batch_counts_likely_matches_as_aliases(monkeypatch):
+    from app import tasks
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    session.add(Book(
+        title="Project Hail Mary US",
+        author="Andy Weir, narrator",
+        hardcover_id=123,
+    ))
+    session.commit()
+
+    async def fake_graphql(query, variables, db):
+        return {
+            "books": [{
+                "id": 123,
+                "title": "Project Hail Mary",
+                "release_year": 2021,
+                "release_date": None,
+                "contributions": [{"author": {"name": "Andy Weir"}}],
+                "editions": [],
+            }]
+        }
+
+    monkeypatch.setattr(tasks, "SessionLocal", lambda: session)
+    monkeypatch.setattr(tasks, "execute_graphql", fake_graphql)
+    result = await tasks.sync_missing_metadata(batch_size=1)
+
+    assert result == {
+        "selected": 1,
+        "synced": 0,
+        "alias": 1,
+        "review": 0,
+        "failed": 0,
+    }
+    check = Session()
+    try:
+        saved = check.query(Book).filter(Book.hardcover_id == 123).one()
+        assert saved.hardcover_metadata_status == "alias"
+        assert saved.published_date == "2021"
+    finally:
+        check.close()
