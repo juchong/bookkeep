@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from typing import Any, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import Book
+from app.models import Book, BookRequest, DownloadTask
 
 
 INVALID_TEXT_VALUES = {"", "none", "null", "nan", "undefined"}
@@ -123,6 +124,101 @@ def _author_tokens(value: Any) -> set[str]:
         for token in re.sub(r"[^a-z0-9]+", " ", text.lower()).split()
         if len(token) >= 3
     }
+
+
+def normalize_isbn(value: Any) -> Optional[str]:
+    """Normalize an ISBN-like value for identity comparisons."""
+    text = clean_text(value)
+    if not text:
+        return None
+    normalized = re.sub(r"[^0-9Xx]", "", text).upper()
+    return normalized if len(normalized) in {10, 13} else None
+
+
+def authors_match(left: Any, right: Any) -> bool:
+    """Return whether two author strings have a meaningful token overlap."""
+    left_tokens = _author_tokens(left)
+    right_tokens = _author_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    overlap = left_tokens & right_tokens
+    if len(overlap) >= 2:
+        return True
+    # Initials disappear during tokenization, so a one-token name such as
+    # "J. K. Rowling" legitimately matches the surname in a full name.
+    return len(overlap) == 1 and min(len(left_tokens), len(right_tokens)) == 1
+
+
+def select_hardcover_search_hit(
+    title: Any,
+    author: Any,
+    hits: Any,
+    *,
+    isbn: Any = None,
+) -> Optional[dict[str, Any]]:
+    """Select a search hit only when its identity is strongly supported.
+
+    Hardcover search relevance is not an identity guarantee: a query for a
+    work can rank another book in the same series first. ISBN is definitive;
+    otherwise require an exact/near-exact title (including alternative titles)
+    plus meaningful author agreement.
+    """
+    wanted_title = _normalize_title(title)
+    wanted_author = clean_text(author)
+    wanted_isbn = normalize_isbn(isbn)
+    candidates: list[tuple[float, int, dict[str, Any]]] = []
+
+    for raw_hit in hits or []:
+        hit = _as_dict(raw_hit)
+        document = _as_dict(hit.get("document"))
+        if not document.get("id"):
+            continue
+
+        candidate_isbns = {
+            normalized
+            for value in document.get("isbns") or []
+            if (normalized := normalize_isbn(value))
+        }
+        isbn_matches = bool(wanted_isbn and wanted_isbn in candidate_isbns)
+
+        raw_titles = [document.get("title"), *(document.get("alternative_titles") or [])]
+        candidate_titles = [
+            normalized for value in raw_titles
+            if (normalized := _normalize_title(value))
+        ]
+        exact_title = bool(wanted_title and wanted_title in candidate_titles)
+        title_ratio = max(
+            (SequenceMatcher(None, wanted_title, candidate).ratio()
+             for candidate in candidate_titles),
+            default=0.0,
+        )
+        candidate_author = ", ".join(document.get("author_names") or [])
+        author_matches = authors_match(wanted_author, candidate_author)
+
+        # Library metadata is not authoritative: embedded ebook ISBNs are
+        # sometimes copied from another work.  An ISBN strengthens a match but
+        # must not override a contradictory title/author identity.
+        title_matches = exact_title or title_ratio >= 0.90
+        identity_matches = title_matches and (
+            not wanted_author or author_matches
+        )
+
+        if isbn_matches and identity_matches:
+            score = 300.0
+        elif exact_title and author_matches:
+            score = 200.0
+        elif title_ratio >= 0.90 and author_matches:
+            score = 100.0 + title_ratio
+        else:
+            continue
+
+        popularity = int(document.get("users_count") or 0)
+        candidates.append((score, popularity, document))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
 
 
 def _extract_authors(source: Mapping[str, Any]) -> tuple[Optional[str], Optional[int]]:
@@ -280,6 +376,137 @@ def extract_hardcover_metadata(source: Any) -> dict[str, Any]:
     return mapped
 
 
+def hardcover_source_matches_identity(
+    title: Any,
+    author: Any,
+    source: Any,
+    *,
+    isbn: Any = None,
+) -> bool:
+    """Validate a directly supplied Hardcover ID/slug against library identity."""
+    raw_source = _as_dict(source)
+    metadata = extract_hardcover_metadata(raw_source)
+    source_isbns = []
+    for edition in raw_source.get("editions") or []:
+        edition = _as_dict(edition)
+        source_isbns.extend((edition.get("isbn_13"), edition.get("isbn_10")))
+
+    hit = {
+        "document": {
+            "id": raw_source.get("id"),
+            "title": metadata.get("title"),
+            "author_names": [metadata.get("author")] if metadata.get("author") else [],
+            "isbns": [value for value in source_isbns if value],
+        }
+    }
+    return select_hardcover_search_hit(title, author, [hit], isbn=isbn) is not None
+
+
+def mark_book_unmapped(
+    book: Book,
+    *,
+    checked_at: Optional[datetime] = None,
+) -> None:
+    """Remove an untrusted Hardcover identity while preserving local operations."""
+    for field in (
+        "hardcover_id",
+        "hardcover_slug",
+        "author_id",
+        "isbn",
+        "description",
+        "cover_url",
+        "genre",
+        "published_date",
+        "rating",
+        "page_count",
+        "default_edition_id",
+        "default_physical_edition_id",
+        "default_ebook_edition_id",
+        "default_audio_edition_id",
+        "series",
+        "series_id",
+        "series_position",
+        "genres",
+        "ratings_count",
+        "users_count",
+        "activities_count",
+        "release_year",
+    ):
+        setattr(book, field, None)
+    book.is_seed_data = False
+    book.hardcover_metadata_status = "unmapped"
+    book.hardcover_metadata_checked_at = checked_at or datetime.now(timezone.utc)
+    book.last_refreshed = checked_at or datetime.now(timezone.utc)
+
+
+def _release_hashes(value: Any) -> list[Any]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, ValueError):
+        return []
+    return decoded if isinstance(decoded, list) else []
+
+
+def merge_book_operational_state(db: Session, source: Book, target: Book) -> bool:
+    """Merge a duplicate book into a canonical row without losing local state.
+
+    Returns ``False`` rather than discarding either row when both carry different
+    external library IDs that the one-column model cannot represent together.
+    """
+    if source.id == target.id:
+        return True
+    for field in ("booklore_id", "audiobookshelf_id"):
+        source_value = getattr(source, field)
+        target_value = getattr(target, field)
+        if source_value and target_value and source_value != target_value:
+            return False
+
+    external_values = {
+        field: getattr(source, field)
+        for field in ("booklore_id", "audiobookshelf_id")
+        if getattr(source, field) and not getattr(target, field)
+    }
+    for field in external_values:
+        setattr(source, field, None)
+    if external_values:
+        db.flush()
+        for field, value in external_values.items():
+            setattr(target, field, value)
+
+    db.query(BookRequest).filter(BookRequest.book_id == source.id).update(
+        {BookRequest.book_id: target.id}, synchronize_session=False
+    )
+    db.query(DownloadTask).filter(DownloadTask.book_id == source.id).update(
+        {DownloadTask.book_id: target.id}, synchronize_session=False
+    )
+
+    target.ebook_available = bool(target.ebook_available or source.ebook_available)
+    target.audiobook_available = bool(
+        target.audiobook_available or source.audiobook_available
+    )
+    target.is_seed_data = bool(target.is_seed_data or source.is_seed_data)
+    if source.booklore_added_on and (
+        not target.booklore_added_on
+        or source.booklore_added_on < target.booklore_added_on
+    ):
+        target.booklore_added_on = source.booklore_added_on
+
+    hashes = list(dict.fromkeys(
+        [*_release_hashes(target.downloaded_release_hashes),
+         *_release_hashes(source.downloaded_release_hashes)]
+    ))
+    if hashes:
+        target.downloaded_release_hashes = json.dumps(hashes)
+
+    db.add(target)
+    db.flush()
+    db.delete(source)
+    db.flush()
+    return True
+
+
 def classify_hardcover_mapping(book: Book, source: Any) -> str:
     """Classify identity confidence before authoritative metadata is applied."""
     data = extract_hardcover_metadata(source)
@@ -308,6 +535,7 @@ def apply_hardcover_metadata(
     source: Any,
     *,
     authoritative: bool,
+    repair_identity: bool = False,
     checked_at: Optional[datetime] = None,
 ) -> str:
     """Apply source metadata without touching Bookkeep operational fields."""
@@ -315,7 +543,7 @@ def apply_hardcover_metadata(
     mapping_confidence = classify_hardcover_mapping(book, source)
     confidence = mapping_confidence if authoritative else "partial"
 
-    if mapping_confidence == "review":
+    if mapping_confidence == "review" and not repair_identity:
         if authoritative:
             if clean_text(getattr(book, "published_date", None)) is None:
                 book.published_date = None
@@ -323,7 +551,7 @@ def apply_hardcover_metadata(
             book.hardcover_metadata_checked_at = checked_at or datetime.now(timezone.utc)
         return confidence
 
-    preserve_identity = mapping_confidence == "likely"
+    preserve_identity = mapping_confidence == "likely" and not repair_identity
     for field, value in metadata.items():
         if field == "hardcover_id":
             continue
@@ -349,6 +577,7 @@ def upsert_hardcover_book(
     source: Any,
     *,
     authoritative: bool = True,
+    repair_identity: bool = False,
     is_seed_data: Optional[bool] = None,
 ) -> tuple[Book, bool, str]:
     """Create or reconcile a Book. The caller owns the transaction."""
@@ -378,7 +607,10 @@ def upsert_hardcover_book(
             source.pop("editions", None)
 
     confidence = apply_hardcover_metadata(
-        book, source, authoritative=authoritative
+        book,
+        source,
+        authoritative=authoritative,
+        repair_identity=repair_identity,
     )
     if is_seed_data is True:
         book.is_seed_data = True

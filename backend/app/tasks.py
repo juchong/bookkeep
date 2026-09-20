@@ -2,6 +2,7 @@
 Background tasks for refreshing seed data
 """
 import asyncio
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from sqlalchemy.orm import Session
@@ -13,13 +14,87 @@ from app.routers.settings import get_hardcover_token
 from app.downloads.orchestrator import _payload_matches_book
 from app.services.hardcover_metadata import (
     HARDCOVER_BOOKS_BY_IDS_QUERY,
+    _normalize_title,
+    authors_match,
     clean_text,
+    hardcover_source_matches_identity,
+    normalize_isbn,
     publication_date,
     upsert_hardcover_book,
 )
 import structlog
 
 logger = structlog.get_logger()
+
+
+def _select_local_book_match(
+    title: str,
+    author: str,
+    isbn: Optional[str],
+    verified_by_title,
+    verified_by_isbn,
+) -> Optional[Book]:
+    """Select one still-valid local identity from mutable reconciliation indexes."""
+    source_isbn = normalize_isbn(isbn)
+    normalized_title = _normalize_title(title)
+    isbn_candidates = [
+        candidate
+        for candidate in verified_by_isbn.get(source_isbn, [])
+        if normalize_isbn(candidate.isbn) == source_isbn
+        and candidate.hardcover_metadata_status in ("synced", "alias")
+        and _normalize_title(candidate.title) == normalized_title
+        and authors_match(author, candidate.author)
+    ] if source_isbn else []
+    if len(isbn_candidates) == 1:
+        return isbn_candidates[0]
+
+    title_candidates = [
+        candidate
+        for candidate in verified_by_title.get(normalized_title, [])
+        if _normalize_title(candidate.title) == normalized_title
+        and candidate.hardcover_metadata_status in ("synced", "alias")
+        and authors_match(author, candidate.author)
+    ]
+    return title_candidates[0] if len(title_candidates) == 1 else None
+
+
+def _booklore_identity_matches(
+    book: Book,
+    title: str,
+    author: str,
+) -> bool:
+    """Validate that an existing Booklore link still names the same work."""
+    return (
+        book.hardcover_metadata_status in ("synced", "alias")
+        and _normalize_title(book.title) == _normalize_title(title)
+        and authors_match(author, book.author)
+    )
+
+
+def _detach_orphaned_booklore_mappings(
+    db: Session,
+    current_booklore_ids,
+) -> int:
+    """Detach mappings whose Booklore records no longer exist."""
+    current_ids = {
+        str(booklore_id)
+        for booklore_id in current_booklore_ids
+        if booklore_id is not None
+    }
+    detached = 0
+    for book in db.query(Book).filter(Book.booklore_id.isnot(None)).all():
+        if str(book.booklore_id) in current_ids:
+            continue
+        logger.warning(
+            "booklore_orphaned_mapping_detached",
+            book_id=book.id,
+            booklore_id=book.booklore_id,
+            title=book.title,
+        )
+        book.booklore_id = None
+        db.add(book)
+        detached += 1
+    return detached
 
 
 def create_book_from_booklore_data(
@@ -362,6 +437,12 @@ async def sync_from_booklore():
             return
         
         logger.info("sync_from_booklore_fetched", count=len(booklore_books))
+
+        orphaned_count = _detach_orphaned_booklore_mappings(
+            db, (book.get("id") for book in booklore_books)
+        )
+        if orphaned_count:
+            db.commit()
         
         # Get admin user for creating import requests (use first admin or first user)
         admin_user = db.query(User).filter(User.is_admin == True).first()
@@ -376,6 +457,22 @@ async def sync_from_booklore():
         skipped_count = 0  # Books skipped (no hardcover ID)
         books_created = 0  # New books created in DB
         books_updated = 0  # Existing books updated in DB
+
+        # Prefer already-verified local identities before calling Hardcover.
+        # This makes the job resumable, avoids rate limits, and prevents search
+        # ranking from changing a mapping that Bookkeep has already verified.
+        verified_by_title = defaultdict(list)
+        verified_by_isbn = defaultdict(list)
+        for local_book in db.query(Book).filter(
+            Book.hardcover_id.isnot(None),
+            Book.hardcover_metadata_status.in_(("synced", "alias")),
+        ).all():
+            normalized = _normalize_title(local_book.title)
+            if normalized:
+                verified_by_title[normalized].append(local_book)
+            normalized_isbn = normalize_isbn(local_book.isbn)
+            if normalized_isbn:
+                verified_by_isbn[normalized_isbn].append(local_book)
         
         # Log first book structure for debugging
         if booklore_books:
@@ -412,9 +509,12 @@ async def sync_from_booklore():
                 format_type = "ebook"
 
             # Fast-path: if we've already imported this Booklore book, skip Hardcover lookups
+            stale_booklore_mapping = None
             if booklore_id:
                 existing_by_booklore = db.query(Book).filter(Book.booklore_id == booklore_id).first()
-                if existing_by_booklore:
+                if existing_by_booklore and _booklore_identity_matches(
+                    existing_by_booklore, title, author
+                ):
                     if booklore_added_on:
                         existing_by_booklore.booklore_added_on = booklore_added_on
                     if format_type == "audiobook":
@@ -445,16 +545,56 @@ async def sync_from_booklore():
                                      error=str(commit_error))
                         db.rollback()
                     continue
+                stale_booklore_mapping = existing_by_booklore
 
             # hardcoverId in Booklore can be either a numeric ID or a slug
             hardcover_id_int = None
             hardcover_slug = None
             hardcover_book_data = None
+
+            local_match = _select_local_book_match(
+                title,
+                author,
+                metadata.get("isbn13") or metadata.get("isbn10"),
+                verified_by_title,
+                verified_by_isbn,
+            )
+            if local_match:
+                hardcover_id_int = local_match.hardcover_id
+                hardcover_slug = local_match.hardcover_slug
+                logger.info(
+                    "booklore_local_identity_match",
+                    book_id=local_match.id,
+                    hardcover_id=local_match.hardcover_id,
+                    title=title,
+                )
             
-            if hardcover_id_raw:
+            if hardcover_id_raw and not hardcover_id_int:
                 try:
                     # Try to parse as integer first
-                    hardcover_id_int = int(hardcover_id_raw)
+                    claimed_id = int(hardcover_id_raw)
+                    result = await execute_graphql(
+                        HARDCOVER_BOOKS_BY_IDS_QUERY, {"ids": [claimed_id]}, db
+                    )
+                    await asyncio.sleep(0.5)
+                    books = result.get("books") or []
+                    claimed_book = books[0] if books else None
+                    if claimed_book and hardcover_source_matches_identity(
+                        title,
+                        author,
+                        claimed_book,
+                        isbn=metadata.get("isbn13") or metadata.get("isbn10"),
+                    ):
+                        hardcover_book_data = claimed_book
+                        hardcover_id_int = claimed_id
+                        hardcover_slug = claimed_book.get("slug")
+                    else:
+                        logger.warning(
+                            "booklore_hardcover_id_identity_rejected",
+                            booklore_id=booklore_id,
+                            claimed_id=claimed_id,
+                            title=title,
+                        )
                 except (ValueError, TypeError):
                     # It's a slug (e.g., "dogs-of-war-2017")
                     hardcover_slug = str(hardcover_id_raw)
@@ -464,19 +604,39 @@ async def sync_from_booklore():
                         hardcover_book_data = await lookup_book_by_slug(hardcover_slug, db)
                         # Small delay to avoid rate limiting (0.5 seconds between requests)
                         await asyncio.sleep(0.5)
-                        if hardcover_book_data:
+                        if hardcover_book_data and hardcover_source_matches_identity(
+                            title,
+                            author,
+                            hardcover_book_data,
+                            isbn=metadata.get("isbn13") or metadata.get("isbn10"),
+                        ):
                             hardcover_id_int = hardcover_book_data.get("id")
                             logger.info("hardcover_lookup_success",
                                       slug=hardcover_slug,
                                       hardcover_id=hardcover_id_int,
                                       title=hardcover_book_data.get("title"))
+                        else:
+                            logger.warning(
+                                "booklore_hardcover_slug_identity_rejected",
+                                booklore_id=booklore_id,
+                                claimed_slug=hardcover_slug,
+                                title=title,
+                            )
+                            hardcover_book_data = None
+                            hardcover_slug = None
                     except Exception as e:
                         logger.warning("hardcover_lookup_failed", slug=hardcover_slug, error=str(e))
+                        hardcover_slug = None
             
             # If still no hardcover identifier, try searching by title/author
             if not hardcover_id_int and not hardcover_slug:
                 try:
-                    hardcover_book_data = await lookup_book_by_title_author(title, author, db)
+                    hardcover_book_data = await lookup_book_by_title_author(
+                        title,
+                        author,
+                        db,
+                        isbn=metadata.get("isbn13") or metadata.get("isbn10"),
+                    )
                     # Small delay to avoid rate limiting
                     await asyncio.sleep(0.5)
                     if hardcover_book_data:
@@ -492,6 +652,17 @@ async def sync_from_booklore():
             # If still no hardcover ID, skip this book
             if not hardcover_id_int:
                 skipped_count += 1
+                if stale_booklore_mapping:
+                    # A quarantined identity must not remain an active mapping
+                    # merely because no replacement was safe to infer.
+                    stale_booklore_mapping.booklore_id = None
+                    db.commit()
+                    logger.warning(
+                        "booklore_ambiguous_mapping_detached",
+                        old_book_id=stale_booklore_mapping.id,
+                        booklore_id=booklore_id,
+                        title=title,
+                    )
                 logger.debug("booklore_book_skipped_no_hardcover_id",
                            title=title,
                            isbn=metadata.get("isbn13") or metadata.get("isbn10"))
@@ -581,13 +752,28 @@ async def sync_from_booklore():
                                title=title,
                                author=author,
                                book_id=db_book.id)
+
+            if stale_booklore_mapping and (
+                db_book is None or stale_booklore_mapping.id != db_book.id
+            ):
+                # The legacy first-hit matcher attached this library record to
+                # the wrong work. Detach it before either updating an existing
+                # canonical row or inserting a corrected one, otherwise the
+                # unique booklore_id constraint rejects the repair.
+                stale_booklore_mapping.booklore_id = None
+                logger.warning(
+                    "booklore_stale_mapping_detached",
+                    old_book_id=stale_booklore_mapping.id,
+                    new_book_id=db_book.id if db_book else None,
+                    booklore_id=booklore_id,
+                )
+                db.flush()
             
             if db_book:
                 # UPDATE existing book with new data
-                db_book.title = title
-                db_book.author = author
-                db_book.description = description or db_book.description
-                db_book.cover_url = cover_url or db_book.cover_url
+                if not hardcover_book_data:
+                    db_book.description = description or db_book.description
+                    db_book.cover_url = cover_url or db_book.cover_url
                 
                 # Only update ISBN if it won't cause a conflict
                 if isbn and isbn != db_book.isbn:
@@ -757,8 +943,18 @@ async def sync_from_booklore():
                 # Apply all Hardcover-owned fields through the canonical mapper;
                 # Booklore identifiers and availability remain locally owned.
                 db_book, _, _ = upsert_hardcover_book(
-                    db, hardcover_book_data, authoritative=False
+                    db,
+                    hardcover_book_data,
+                    authoritative=True,
+                    repair_identity=True,
                 )
+                if db_book.hardcover_metadata_status in ("synced", "alias"):
+                    key = _normalize_title(db_book.title)
+                    if all(item.id != db_book.id for item in verified_by_title[key]):
+                        verified_by_title[key].append(db_book)
+                    key = normalize_isbn(db_book.isbn)
+                    if key and all(item.id != db_book.id for item in verified_by_isbn[key]):
+                        verified_by_isbn[key].append(db_book)
             
             # Check if we have an existing request for this book matching the format
             # Update to "available" if the book is now in Booklore
@@ -786,11 +982,62 @@ async def sync_from_booklore():
                              error=str(commit_error))
                 db.rollback()
         
+        # Grimmory exposes no Hardcover identity IDs. Reconcile only exact
+        # normalized title + meaningful author matches; ambiguous search results
+        # must remain open rather than becoming false availability.
+        title_flips = 0
+        try:
+            open_reqs = db.query(BookRequest).filter(
+                BookRequest.status.in_(("processing", "approved", "pending"))
+            ).all()
+            req_index = defaultdict(list)
+            for r in open_reqs:
+                rb = db.query(Book).filter(Book.id == r.book_id).first()
+                if rb and rb.title:
+                    req_index[(r.format, _normalize_title(rb.title))].append((r, rb))
+
+            for bl_book in booklore_books:
+                md = bl_book.get("metadata") or {}
+                bl_title = bl_book.get("title") or md.get("title")
+                norm = _normalize_title(bl_title)
+                if not norm:
+                    continue
+                lib_id = bl_book.get("libraryId")
+                bt = (bl_book.get("bookType") or "").lower()
+                if "audio" in bt or (booklore_server.audiobook_library_id and lib_id == booklore_server.audiobook_library_id):
+                    fmt = "audiobook"
+                else:
+                    fmt = "ebook"
+                bl_authors = ", ".join(md.get("authors") or [])
+                for r, rb in req_index.get((fmt, norm), []):
+                    if r.status not in ("processing", "approved", "pending"):
+                        continue
+                    if not authors_match(bl_authors, rb.author):
+                        continue
+                    r.status = "available"
+                    r.updated_at = datetime.now(timezone.utc)
+                    if fmt == "audiobook":
+                        rb.audiobook_available = True
+                    else:
+                        rb.ebook_available = True
+                    db.add(r)
+                    db.add(rb)
+                    title_flips += 1
+                    logger.info("booklore_request_title_matched_available",
+                                request_id=r.id, title=rb.title, format=fmt)
+            if title_flips:
+                db.commit()
+        except Exception as reconcile_error:
+            logger.warning("sync_from_booklore_title_reconcile_failed", error=str(reconcile_error))
+            db.rollback()
+
         logger.info("sync_from_booklore_complete",
                    booklore_books=len(booklore_books),
                    books_created=books_created,
                    books_updated=books_updated,
                    requests_updated=updated_count,
+                   orphaned_mappings_detached=orphaned_count,
+                   title_flips=title_flips,
                    skipped=skipped_count)
         
     except Exception as e:

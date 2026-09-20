@@ -15,6 +15,7 @@ from app.auth import require_admin
 from app.services.hardcover_metadata import (
     HARDCOVER_BOOKS_BY_IDS_QUERY,
     publication_date,
+    select_hardcover_search_hit,
     upsert_hardcover_book,
 )
 
@@ -847,15 +848,16 @@ async def lookup_book_by_slug(slug: str, db: Session = None) -> Optional[dict]:
         return None
 
 
-async def lookup_book_by_title_author(title: str, author: str = None, db: Session = None) -> Optional[dict]:
+async def lookup_book_by_title_author(
+    title: str,
+    author: str = None,
+    db: Session = None,
+    isbn: str = None,
+) -> Optional[dict]:
     """
     Search for a book on Hardcover by title and optionally author.
     Returns the best match or None if not found.
     """
-    search_query = title
-    if author:
-        search_query = f"{title} {author}"
-    
     query = """
     query SearchBooks($query: String!) {
       search(query: $query) {
@@ -866,23 +868,32 @@ async def lookup_book_by_title_author(title: str, author: str = None, db: Sessio
     """
 
     try:
-        result = await execute_graphql(query, {"query": search_query}, db)
-        search_response = result.get("search", {})
-        results_obj = search_response.get("results", {}) if isinstance(search_response, dict) else {}
-        hits = results_obj.get("hits", []) if isinstance(results_obj, dict) else []
+        searches = [title]
+        if author:
+            searches.append(f"{title} {author}")
+        hits = []
+        seen_ids = set()
+        for search_query in searches:
+            result = await execute_graphql(query, {"query": search_query}, db)
+            search_response = result.get("search", {})
+            results_obj = search_response.get("results", {}) if isinstance(search_response, dict) else {}
+            for hit in results_obj.get("hits", []) if isinstance(results_obj, dict) else []:
+                doc = hit.get("document", {}) if isinstance(hit, dict) else {}
+                if doc.get("id") and doc.get("id") not in seen_ids:
+                    seen_ids.add(doc.get("id"))
+                    hits.append(hit)
 
-        for hit in hits[:5]:
-            doc = hit.get("document", {})
-            if doc and doc.get("id"):
-                # Found a match - now fetch full details
-                book_id = doc.get("id")
-                logger.info("hardcover_search_match_found", 
-                          search=search_query, 
-                          matched_id=book_id, 
-                          matched_title=doc.get("title"))
-                
-                # Fetch full book details using the ID
-                full_query = """
+        doc = select_hardcover_search_hit(title, author, hits, isbn=isbn)
+        if doc:
+            book_id = doc.get("id")
+            logger.info(
+                "hardcover_search_match_found",
+                search=title,
+                matched_id=book_id,
+                matched_title=doc.get("title"),
+            )
+
+            full_query = """
                 query GetBook($id: Int!) {
                   books_by_pk(id: $id) {
                     id
@@ -922,14 +933,14 @@ async def lookup_book_by_title_author(title: str, author: str = None, db: Sessio
                     }
                   }
                 }
-                """
-                full_result = await execute_graphql(full_query, {"id": int(book_id)}, db)
-                return full_result.get("books_by_pk")
+            """
+            full_result = await execute_graphql(full_query, {"id": int(book_id)}, db)
+            return full_result.get("books_by_pk")
         
-        logger.warning("hardcover_search_no_match", search=search_query)
+        logger.warning("hardcover_search_no_identity_match", title=title, author=author)
         return None
     except Exception as e:
-        logger.error("hardcover_search_error", search=search_query, error=str(e))
+        logger.error("hardcover_search_error", search=title, error=str(e))
         return None
 
 

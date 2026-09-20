@@ -1,13 +1,20 @@
+import json
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Book, BookRequest, User
+from app.models import Book, BookRequest, DownloadTask, User
 from app.services.hardcover_metadata import (
+    authors_match,
     apply_hardcover_metadata,
     extract_hardcover_metadata,
+    hardcover_source_matches_identity,
+    mark_book_unmapped,
+    merge_book_operational_state,
     publication_date,
+    select_hardcover_search_hit,
     upsert_hardcover_book,
 )
 
@@ -24,6 +31,243 @@ def make_book(**values):
     }
     defaults.update(values)
     return Book(**defaults)
+
+
+def search_hit(book_id, title, authors, **extra):
+    return {"document": {
+        "id": str(book_id),
+        "title": title,
+        "author_names": authors,
+        **extra,
+    }}
+
+
+def test_search_hit_selection_does_not_trust_first_series_result():
+    hits = [
+        search_hit(427363, "God Emperor of Dune", ["Frank Herbert"]),
+        search_hit(2046, "Dune", ["Frank Herbert"]),
+    ]
+
+    selected = select_hardcover_search_hit("Dune", "Frank Herbert", hits)
+
+    assert selected["id"] == "2046"
+
+
+def test_search_hit_selection_rejects_wrong_author_for_same_title():
+    hits = [search_hit(1, "Home", ["Marilynne Robinson"])]
+
+    assert select_hardcover_search_hit("Home", "Toni Morrison", hits) is None
+
+
+def test_search_hit_selection_accepts_alternative_title_and_isbn():
+    hits = [search_hit(
+        2,
+        "Harry Potter and the Philosopher's Stone",
+        ["J. K. Rowling"],
+        alternative_titles=["Harry Potter and the Sorcerer's Stone"],
+        isbns=["978-0-7475-3269-9"],
+    )]
+
+    by_title = select_hardcover_search_hit(
+        "Harry Potter and the Sorcerer's Stone", "J.K. Rowling", hits
+    )
+    by_isbn = select_hardcover_search_hit(
+        "Harry Potter and the Philosopher's Stone",
+        "J.K. Rowling",
+        hits,
+        isbn="9780747532699",
+    )
+
+    assert by_title["id"] == "2"
+    assert by_isbn["id"] == "2"
+
+
+def test_search_hit_selection_rejects_conflicting_title_despite_isbn():
+    hits = [search_hit(
+        110636,
+        "Windhaven",
+        ["George R. R. Martin", "Lisa Tuttle"],
+        isbns=["9780553386177"],
+    )]
+
+    assert select_hardcover_search_hit(
+        "A Feast for Crows",
+        "George R. R. Martin",
+        hits,
+        isbn="9780553386177",
+    ) is None
+
+
+def test_direct_hardcover_id_must_match_library_identity():
+    source = {
+        "id": 1218835,
+        "title": "Crocodile",
+        "contributions": [{"author": {"name": "Dan Wylie"}}],
+        "editions": [],
+    }
+
+    assert hardcover_source_matches_identity("Crocodile", "Dan Wylie", source)
+    assert not hardcover_source_matches_identity(
+        "Crocodile 000 (2025) (digital)", "Dan Wylie", source
+    )
+
+
+def test_author_matching_requires_more_than_a_shared_common_first_name():
+    assert authors_match("J. K. Rowling", "Joanne Rowling")
+    assert not authors_match("James Patterson", "James Rollins")
+
+
+def test_local_identity_index_revalidates_mutated_book_keys():
+    from app.tasks import _booklore_identity_matches, _select_local_book_match
+
+    book = make_book(
+        title="The Rules of Attraction",
+        author="Bret Easton Ellis",
+        hardcover_metadata_status="synced",
+    )
+    stale_index = {
+        "american psycho": [book],
+        "rules attraction": [book],
+    }
+
+    assert _select_local_book_match(
+        "American Psycho", "Bret Easton Ellis", None, stale_index, {}
+    ) is None
+    assert _select_local_book_match(
+        "The Rules of Attraction", "Bret Easton Ellis", None, stale_index, {}
+    ) is book
+    assert _booklore_identity_matches(
+        book, "The Rules of Attraction", "Bret Easton Ellis"
+    )
+
+
+def test_local_isbn_match_cannot_override_conflicting_title():
+    from app.tasks import _booklore_identity_matches, _select_local_book_match
+
+    windhaven = make_book(
+        title="Windhaven",
+        author="George R.R. Martin, Lisa Tuttle",
+        isbn="9780553386177",
+        hardcover_metadata_status="synced",
+    )
+
+    assert _select_local_book_match(
+        "A Feast for Crows",
+        "George R. R. Martin",
+        "9780553386177",
+        {},
+        {"9780553386177": [windhaven]},
+    ) is None
+    assert not _booklore_identity_matches(
+        windhaven, "A Feast for Crows", "George R. R. Martin"
+    )
+
+
+def test_orphaned_booklore_mappings_are_detached():
+    from app.tasks import _detach_orphaned_booklore_mappings
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db_session = sessionmaker(bind=engine)()
+    current = make_book(hardcover_id=9001, booklore_id=101)
+    orphaned = make_book(hardcover_id=9002, booklore_id=102)
+    db_session.add_all([current, orphaned])
+    db_session.commit()
+
+    detached = _detach_orphaned_booklore_mappings(db_session, [101])
+    db_session.flush()
+
+    assert detached == 1
+    assert current.booklore_id == 101
+    assert orphaned.booklore_id is None
+
+
+def test_duplicate_merge_preserves_requests_downloads_and_local_state():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    user = User(
+        email="merge@example.com",
+        username="merge-user",
+        hashed_password="x",
+    )
+    target = make_book(
+        hardcover_id=7001,
+        title="Canonical",
+        ebook_available=False,
+        downloaded_release_hashes='["target"]',
+        hardcover_metadata_status="synced",
+    )
+    source = make_book(
+        hardcover_id=7002,
+        title="Canonical",
+        ebook_available=True,
+        audiobook_available=True,
+        audiobookshelf_id="audio-source",
+        downloaded_release_hashes='["source"]',
+        hardcover_metadata_status="review",
+    )
+    session.add_all([user, target, source])
+    session.flush()
+    request = BookRequest(
+        book_id=source.id,
+        user_id=user.id,
+        format="ebook",
+        status="available",
+    )
+    task = DownloadTask(book_id=source.id, format="ebook", source="manual")
+    session.add_all([request, task])
+    session.commit()
+
+    assert merge_book_operational_state(session, source, target)
+    session.commit()
+
+    assert session.get(Book, source.id) is None
+    assert request.book_id == target.id
+    assert task.book_id == target.id
+    assert target.ebook_available is True
+    assert target.audiobook_available is True
+    assert target.audiobookshelf_id == "audio-source"
+    assert set(json.loads(target.downloaded_release_hashes)) == {
+        "target", "source"
+    }
+
+
+def test_duplicate_merge_refuses_conflicting_external_library_ids():
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine)()
+    target = make_book(hardcover_id=7101, audiobookshelf_id="target-audio")
+    source = make_book(hardcover_id=7102, audiobookshelf_id="source-audio")
+    session.add_all([target, source])
+    session.commit()
+
+    assert not merge_book_operational_state(session, source, target)
+    assert session.get(Book, source.id) is source
+
+
+def test_mark_unmapped_removes_bad_metadata_but_preserves_operations():
+    book = make_book(
+        hardcover_id=7201,
+        hardcover_slug="wrong",
+        isbn="wrong-isbn",
+        audiobookshelf_id="keep-audio",
+        ebook_available=True,
+        downloaded_release_hashes='["keep"]',
+        hardcover_metadata_status="review",
+    )
+
+    mark_book_unmapped(book)
+
+    assert book.title == "Existing Title"
+    assert book.hardcover_id is None
+    assert book.hardcover_slug is None
+    assert book.isbn is None
+    assert book.description is None
+    assert book.hardcover_metadata_status == "unmapped"
+    assert book.audiobookshelf_id == "keep-audio"
+    assert book.ebook_available is True
+    assert book.downloaded_release_hashes == '["keep"]'
 
 
 def test_publication_date_never_serializes_none():
@@ -148,6 +392,36 @@ def test_review_match_does_not_overwrite_metadata_or_operational_state():
     assert book.ebook_available is True
     assert book.downloaded_release_hashes == '["kept"]'
     assert book.hardcover_metadata_status == "review"
+
+
+def test_explicit_identity_repair_restores_canonical_fields_only():
+    book = make_book(
+        title="Different Seasons",
+        author="Stephen King",
+        hardcover_id=376341,
+        ebook_available=True,
+        downloaded_release_hashes='["kept"]',
+    )
+
+    confidence = apply_hardcover_metadata(
+        book,
+        {
+            "id": 376341,
+            "title": "The Stand",
+            "description": "Canonical description",
+            "contributions": [{"author": {"name": "Stephen King"}}],
+        },
+        authoritative=True,
+        repair_identity=True,
+    )
+
+    assert confidence == "review"
+    assert book.title == "The Stand"
+    assert book.author == "Stephen King"
+    assert book.description == "Canonical description"
+    assert book.hardcover_metadata_status == "synced"
+    assert book.ebook_available is True
+    assert book.downloaded_release_hashes == '["kept"]'
 
 
 def test_default_physical_edition_supplies_missing_isbn():
