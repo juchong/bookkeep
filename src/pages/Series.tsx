@@ -1,9 +1,9 @@
 import { useEffect, useMemo } from 'react';
 import { BookOpen, CheckCircle, Clock } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { useInfiniteQuery, useQueries, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 import { booksApi, readarrApi, requestsApi } from '@/lib/api';
-import { getPopularSeries, getSeriesBooks, normalizeSeriesBooks, transformHardcoverBook } from '@/lib/hardcover';
+import { getPopularSeries, transformHardcoverBook } from '@/lib/hardcover';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAvailabilityPolling } from '@/hooks/useAvailabilityPolling';
 import type { Book, SeriesItem, RequestStatus, AvailabilityBatchResponse, RequestStatusBatchResponse } from '@/types/book';
@@ -40,7 +40,7 @@ export default function Series() {
   const canLoadMore = lastPageSize === SERIES_PAGE_SIZE;
   const books: Book[] = useMemo(
     () =>
-      booksData.map((book: any) => ({
+      booksData.map((book) => ({
         id: String(book.id),
         title: book.title,
         author: book.author,
@@ -62,27 +62,30 @@ export default function Series() {
     [booksData]
   );
 
-  const seriesQueries = useQueries({
-    queries: seriesList.map((series) => ({
-      queryKey: ['series', series.id],
-      queryFn: () => getSeriesBooks(series.id),
-      enabled: Number.isFinite(series.id),
-    })),
-  });
+  const localBooksBySeriesId = useMemo(() => {
+    const map = new Map<number, Book[]>();
+    books.forEach((book) => {
+      if (!book.seriesId) return;
+      const seriesBooks = map.get(book.seriesId) ?? [];
+      seriesBooks.push(book);
+      map.set(book.seriesId, seriesBooks);
+    });
+    map.forEach((seriesBooks) => {
+      seriesBooks.sort(
+        (left, right) =>
+          (left.seriesPosition ?? Number.POSITIVE_INFINITY) -
+          (right.seriesPosition ?? Number.POSITIVE_INFINITY)
+      );
+    });
+    return map;
+  }, [books]);
 
   const seriesBooksById = useMemo(() => {
-    return seriesList.map((series, index) => {
-      const seriesDetail = seriesQueries[index]?.data?.series_by_pk;
-      const seriesContext = {
-        id: seriesDetail?.id ?? series.id,
-        name: seriesDetail?.name ?? series.name,
-      };
-      const seriesBooks = seriesDetail?.book_series
-        ? normalizeSeriesBooks(seriesDetail.book_series, seriesContext)
-        : [];
-      return { series, seriesDetail, seriesBooks };
+    return seriesList.map((series) => {
+      const seriesBooks = localBooksBySeriesId.get(series.id) ?? [];
+      return { series, seriesBooks };
     });
-  }, [seriesList, seriesQueries]);
+  }, [localBooksBySeriesId, seriesList]);
 
   const ownedCountBySeriesId = useMemo(() => {
     const map: Record<number, number> = {};
@@ -265,7 +268,7 @@ export default function Series() {
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {seriesBooksById.map(({ series, seriesDetail, seriesBooks }) => {
+            {seriesBooksById.map(({ series, seriesBooks }) => {
               const isWholePosition = (position?: number | null) =>
                 typeof position === 'number' &&
                 Number.isFinite(position) &&
@@ -276,54 +279,53 @@ export default function Series() {
               });
               const fallbackBook = series.first_book ? transformHardcoverBook(series.first_book) : null;
               const cover = seriesBooks[0]?.cover || fallbackBook?.cover || '/placeholder.svg';
-            const author =
-              seriesDetail?.author?.name ||
-              seriesBooks[0]?.author ||
-              fallbackBook?.author ||
-              'Unknown Author';
-            // Check if a book is actually available (has files)
-            const isAvailable = (book: Book) => {
-              const hardcoverId = book.hardcoverId ?? Number(book.id);
-              const match = Number.isFinite(hardcoverId)
-                ? availabilityMap.get(Number(hardcoverId))
-                : undefined;
-              const ebookAvailable = book.ebookAvailable || match?.ebook;
-              const audiobookAvailable = book.audiobookAvailable || match?.audiobook;
-              return ebookAvailable || audiobookAvailable;
-            };
+              const author =
+                seriesBooks[0]?.author ||
+                fallbackBook?.author ||
+                'Unknown Author';
+              // Check if a book is actually available (has files)
+              const isAvailable = (book: Book) => {
+                const hardcoverId = book.hardcoverId ?? Number(book.id);
+                const match = Number.isFinite(hardcoverId)
+                  ? availabilityMap.get(Number(hardcoverId))
+                  : undefined;
+                const ebookAvailable = book.ebookAvailable || match?.ebook;
+                const audiobookAvailable = book.audiobookAvailable || match?.audiobook;
+                return ebookAvailable || audiobookAvailable;
+              };
 
-            // Check if a book is requested (but not available)
-            const isRequested = (book: Book) => {
-              const hardcoverId = book.hardcoverId ?? Number(book.id);
-              if (!Number.isFinite(hardcoverId)) return false;
+              // Check if a book is requested (but not available)
+              const isRequested = (book: Book) => {
+                const hardcoverId = book.hardcoverId ?? Number(book.id);
+                if (!Number.isFinite(hardcoverId)) return false;
 
-              const requestStatus = requestStatusMap.get(Number(hardcoverId));
-              if (!requestStatus) return false;
+                const requestStatus = requestStatusMap.get(Number(hardcoverId));
+                if (!requestStatus) return false;
 
-              const hasRequest = requestStatus.ebook || requestStatus.audiobook;
-              return hasRequest && !isAvailable(book);
-            };
+                const hasRequest = requestStatus.ebook || requestStatus.audiobook;
+                return hasRequest && !isAvailable(book);
+              };
 
-            const expandedAvailableCount = seriesBooks.filter(isAvailable).length;
-            const originalAvailableCount = originalBooks.filter(isAvailable).length;
-            const expandedRequestedCount = seriesBooks.filter(isRequested).length;
-            const originalRequestedCount = originalBooks.filter(isRequested).length;
-            const expandedCount = seriesBooks.length;
-            const originalCount = originalBooks.length;
-            const availableCount =
-              expandedCount > 0
-                ? expandedAvailableCount
-                : series.owned_count != null
-                  ? series.owned_count
-                  : (ownedCountBySeriesId[series.id] ?? 0);
-            const requestedCount =
-              expandedCount > 0
-                ? expandedRequestedCount
-                : 0;
-            const totalCount =
-              originalBooks.length > 0
-                ? originalBooks.length
-                : (seriesDetail?.books_count || series.books_count || seriesBooks.length);
+              const expandedAvailableCount = seriesBooks.filter(isAvailable).length;
+              const originalAvailableCount = originalBooks.filter(isAvailable).length;
+              const expandedRequestedCount = seriesBooks.filter(isRequested).length;
+              const originalRequestedCount = originalBooks.filter(isRequested).length;
+              const expandedCount = seriesBooks.length;
+              const originalCount = originalBooks.length;
+              const availableCount =
+                expandedCount > 0
+                  ? expandedAvailableCount
+                  : series.owned_count != null
+                    ? series.owned_count
+                    : (ownedCountBySeriesId[series.id] ?? 0);
+              const requestedCount =
+                expandedCount > 0
+                  ? expandedRequestedCount
+                  : 0;
+              const totalCount =
+                originalBooks.length > 0
+                  ? originalBooks.length
+                  : (series.books_count || seriesBooks.length);
 
               return (
                 <Link
@@ -362,7 +364,7 @@ export default function Series() {
                       {/* Info */}
                       <div className="flex-1 min-w-0 pt-2">
                         <h3 className="font-semibold text-foreground text-lg line-clamp-2">
-                          {seriesDetail?.name || series.name}
+                          {series.name}
                         </h3>
                         <p className="text-sm text-muted-foreground mt-1 line-clamp-1">
                           {author}

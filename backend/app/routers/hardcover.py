@@ -5,7 +5,9 @@ import httpx
 import structlog
 import time
 import asyncio
-from datetime import datetime
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, or_
@@ -24,6 +26,14 @@ logger = structlog.get_logger()
 router = APIRouter()
 
 HARDCOVER_API_URL = "https://api.hardcover.app/v1/graphql"
+HARDCOVER_MAX_RETRY_DELAY_SECONDS = float(
+    os.getenv("HARDCOVER_MAX_RETRY_DELAY_SECONDS", "5")
+)
+
+# A long Retry-After normally represents the account-wide Hardcover quota rather
+# than a transient burst limit. Keep that state process-wide so every request
+# fails fast instead of opening another upstream request and sleeping for hours.
+_hardcover_rate_limited_until = 0.0
 
 # Helper to get token, avoiding circular dependency with settings router
 def get_hardcover_token() -> str:
@@ -134,6 +144,65 @@ def _db_book_to_hardcover_book(db_book: Book) -> schemas.HardcoverBook:
         taggings=taggings,
         ebook_available=db_book.ebook_available or False,
         audiobook_available=db_book.audiobook_available or False,
+    )
+
+
+def _db_book_detail_fallback(
+    book_id: int, db: Session
+) -> Optional[schemas.HardcoverBookDetailResponse]:
+    """Build a detail response from persistent metadata when Hardcover is unavailable."""
+    db_book = db.query(Book).filter(Book.hardcover_id == book_id).first()
+    if not db_book:
+        return None
+
+    detail = schemas.HardcoverBookDetail.model_validate(
+        _db_book_to_hardcover_book(db_book).model_dump()
+    )
+    return schemas.HardcoverBookDetailResponse(books_by_pk=detail)
+
+
+def _db_series_fallback(
+    series_id: int, db: Session
+) -> Optional[schemas.HardcoverSeriesResponse]:
+    """Build a series response from locally persisted series and book metadata."""
+    db_series = db.query(Series).filter(Series.hardcover_id == series_id).first()
+    db_books = (
+        db.query(Book)
+        .filter(Book.series_id == series_id)
+        .order_by(Book.series_position.asc().nulls_last(), Book.release_year.asc().nulls_last())
+        .all()
+    )
+    if not db_series and not db_books:
+        return None
+
+    series_name = (
+        db_series.name
+        if db_series
+        else next((book.series for book in db_books if book.series), f"Series {series_id}")
+    )
+    series_model = schemas.HardcoverSeries(id=series_id, name=series_name)
+    series_books = [
+        schemas.HardcoverBookSeries(
+            series_id=series_id,
+            series=series_model,
+            position=book.series_position,
+            book=_db_book_to_hardcover_book(book),
+        )
+        for book in db_books
+    ]
+    books_count = db_series.books_count if db_series else None
+    if books_count is None:
+        books_count = len(db_books)
+
+    author = next((book.author for book in db_books if book.author), None)
+    return schemas.HardcoverSeriesResponse(
+        series_by_pk=schemas.HardcoverSeriesDetail(
+            id=series_id,
+            name=series_name,
+            author={"name": author} if author else None,
+            books_count=books_count,
+            book_series=series_books,
+        )
     )
 
 def _sample_response(data: dict, max_items: int = 3) -> dict:
@@ -624,8 +693,36 @@ def _ensure_series_fields(db_book: Book, series_id: Optional[int], series_name: 
             logger.warning("failed_to_update_series_fields", book_id=db_book.hardcover_id, error=str(e))
             db.rollback()
 
+
+def _parse_retry_after(value: Optional[str], fallback: float) -> float:
+    """Return a non-negative retry delay from seconds or an HTTP date."""
+    if not value:
+        return fallback
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, retry_at.timestamp() - time.time())
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+
+
+def _hardcover_rate_limit_error(delay: float) -> HTTPException:
+    retry_after = max(1, math.ceil(delay))
+    return HTTPException(
+        status_code=429,
+        detail="Hardcover API rate limit exceeded. Please try again later.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 async def execute_graphql(query: str, variables: dict = None, db: Session = None):
     """Execute a GraphQL query against the Hardcover API"""
+    global _hardcover_rate_limited_until
+
     # Get token - use db if provided, otherwise create a session
     if db:
         from app.routers.settings import get_hardcover_token as get_token_from_db
@@ -656,6 +753,15 @@ async def execute_graphql(query: str, variables: dict = None, db: Session = None
         variables=variables or {},
         url=HARDCOVER_API_URL
     )
+
+    rate_limit_remaining = _hardcover_rate_limited_until - time.time()
+    if rate_limit_remaining > 0:
+        logger.warning(
+            "hardcover_rate_limit_circuit_open",
+            query_name=query_name,
+            retry_after=round(rate_limit_remaining, 1),
+        )
+        raise _hardcover_rate_limit_error(rate_limit_remaining)
     
     max_retries = 5
     base_delay = 1.0  # seconds
@@ -674,14 +780,10 @@ async def execute_graphql(query: str, variables: dict = None, db: Session = None
                 if response.status_code == 429:
                     if attempt < max_retries - 1:
                         # Get retry-after header if available, otherwise use exponential backoff
-                        retry_after = response.headers.get("Retry-After")
-                        if retry_after:
-                            try:
-                                delay = float(retry_after)
-                            except ValueError:
-                                delay = base_delay * (2 ** attempt)
-                        else:
-                            delay = base_delay * (2 ** attempt)
+                        delay = _parse_retry_after(
+                            response.headers.get("Retry-After"),
+                            base_delay * (2 ** attempt),
+                        )
                         
                         logger.warning(
                             "hardcover_rate_limited",
@@ -690,6 +792,17 @@ async def execute_graphql(query: str, variables: dict = None, db: Session = None
                             max_retries=max_retries,
                             retry_after=delay
                         )
+                        if delay > HARDCOVER_MAX_RETRY_DELAY_SECONDS:
+                            _hardcover_rate_limited_until = max(
+                                _hardcover_rate_limited_until,
+                                time.time() + delay,
+                            )
+                            logger.warning(
+                                "hardcover_rate_limit_circuit_opened",
+                                query_name=query_name,
+                                retry_after=delay,
+                            )
+                            raise _hardcover_rate_limit_error(delay)
                         await asyncio.sleep(delay)
                         continue
                     else:
@@ -768,6 +881,8 @@ async def execute_graphql(query: str, variables: dict = None, db: Session = None
                 status_code=500,
                 detail=f"Hardcover API request error: {str(e)}"
             )
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(
                 "hardcover_api_unexpected_error",
@@ -1645,10 +1760,23 @@ async def get_book_details(
         
         logger.info("book_details_api_fetched", book_id=book_id)
         return response
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == 429 or exc.status_code >= 500:
+            fallback = _db_book_detail_fallback(book_id, db)
+            if fallback:
+                logger.warning(
+                    "book_details_database_fallback",
+                    book_id=book_id,
+                    upstream_status=exc.status_code,
+                )
+                return fallback
         raise
     except Exception as e:
         logger.warning("book_details_api_failed", book_id=book_id, error=str(e))
+        fallback = _db_book_detail_fallback(book_id, db)
+        if fallback:
+            logger.warning("book_details_database_fallback", book_id=book_id)
+            return fallback
         raise HTTPException(status_code=404, detail="Book not found")
 
 
@@ -2476,10 +2604,23 @@ async def get_series_books(
         
         logger.info("series_api_fetched", series_id=series_id, count=len(books))
         return response
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == 429 or exc.status_code >= 500:
+            fallback = _db_series_fallback(series_id, db)
+            if fallback:
+                logger.warning(
+                    "series_database_fallback",
+                    series_id=series_id,
+                    upstream_status=exc.status_code,
+                )
+                return fallback
         raise
     except Exception as e:
         logger.warning("series_api_failed", series_id=series_id, error=str(e))
+        fallback = _db_series_fallback(series_id, db)
+        if fallback:
+            logger.warning("series_database_fallback", series_id=series_id)
+            return fallback
         raise HTTPException(status_code=404, detail="Series not found or no relevant books")
 
 @router.post("/series/{series_id}/rebuild", response_model=schemas.HardcoverSeriesResponse)
