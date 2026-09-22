@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/dialog';
 import { toast } from 'sonner';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { downloadSettingsApi, type ProwlarrServer, type ProwlarrIndexer } from '@/lib/api';
+import { downloadSettingsApi, type ProwlarrServer, type ProwlarrIndexer, type ProwlarrTestResponse } from '@/lib/api';
 
 interface ProwlarrForm {
   name: string;
@@ -34,7 +34,7 @@ export default function ProwlarrSettings() {
   const [editingServer, setEditingServer] = useState<ProwlarrServer | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; indexers?: any[]; total_indexers?: number; error?: string } | null>(null);
+  const [testResult, setTestResult] = useState<ProwlarrTestResponse | null>(null);
   const [availableIndexers, setAvailableIndexers] = useState<ProwlarrIndexer[]>([]);
 
   const [form, setForm] = useState<ProwlarrForm>({
@@ -178,7 +178,7 @@ export default function ProwlarrSettings() {
         toast.success('Connection successful!');
         // Store the full indexer data for selection
         if (result.indexers) {
-          const indexers = result.indexers.map((idx: any) => ({
+          const indexers = result.indexers.map((idx) => ({
             id: idx.id,
             name: idx.name,
             protocol: idx.protocol,
@@ -197,10 +197,11 @@ export default function ProwlarrSettings() {
           description: result.error,
         });
       }
-    } catch (error: any) {
-      setTestResult({ success: false, error: error.message });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setTestResult({ success: false, error: message });
       toast.error('Connection test failed', {
-        description: error.message,
+        description: message,
       });
     } finally {
       setTestingConnection(false);

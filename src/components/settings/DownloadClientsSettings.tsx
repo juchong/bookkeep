@@ -42,6 +42,9 @@ interface DownloadClientForm {
   audiobook_category: string;
 }
 
+type DownloadClientPayload = Omit<DownloadClientForm, 'password' | 'api_key'> &
+  Partial<Pick<DownloadClientForm, 'password' | 'api_key'>>;
+
 export default function DownloadClientsSettings() {
   const [showModal, setShowModal] = useState(false);
   const [editingClient, setEditingClient] = useState<DownloadClient | null>(null);
@@ -77,7 +80,7 @@ export default function DownloadClientsSettings() {
 
   // Create/Update mutation
   const saveClientMutation = useMutation({
-    mutationFn: async (data: DownloadClientForm) => {
+    mutationFn: async (data: DownloadClientPayload) => {
       if (editingClient) {
         return downloadSettingsApi.updateDownloadClient(editingClient.id, data);
       } else {
@@ -186,10 +189,11 @@ export default function DownloadClientsSettings() {
           description: result.error,
         });
       }
-    } catch (error: any) {
-      setTestResult({ success: false, error: error.message });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setTestResult({ success: false, error: message });
       toast.error('Connection test failed', {
-        description: error.message,
+        description: message,
       });
     } finally {
       setTestingConnection(false);
@@ -203,13 +207,12 @@ export default function DownloadClientsSettings() {
     }
 
     // Don't send empty password/api_key for updates
-    const data = { ...form };
-    if (editingClient && !data.password) {
-      delete (data as any).password;
-    }
-    if (editingClient && !data.api_key) {
-      delete (data as any).api_key;
-    }
+    const { password, api_key, ...baseData } = form;
+    const data: DownloadClientPayload = {
+      ...baseData,
+      ...(!editingClient || password ? { password } : {}),
+      ...(!editingClient || api_key ? { api_key } : {}),
+    };
 
     saveClientMutation.mutate(data);
   };

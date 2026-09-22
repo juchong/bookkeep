@@ -115,7 +115,7 @@ export function RequestDialog({
         try {
           // Check if book exists
           const existingBooks = await booksApi.getAll(0, 1000);
-          const existing = existingBooks.find((b: any) => 
+          const existing = existingBooks.find((b) =>
             b.hardcover_id === book.hardcoverId || b.isbn === book.isbn
           );
           
@@ -187,10 +187,10 @@ export function RequestDialog({
 
       setNotes('');
       onOpenChange(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Request submission error:', error);
       toast.error('Request failed', {
-        description: error?.message || 'Failed to submit request. Please try again.',
+        description: error instanceof Error ? error.message : 'Failed to submit request. Please try again.',
       });
     } finally {
       setIsSubmitting(false);

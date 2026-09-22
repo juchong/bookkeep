@@ -55,6 +55,8 @@ class ProwlarrSource(ReleaseSource):
 
         self.client = ProwlarrClient(base_url, api_key, timeout)
         self.indexer_ids = indexer_ids
+        self.categoryless_fallback = True
+        self.stop_after_first_results = False
 
     @property
     def name(self) -> str:
@@ -103,7 +105,9 @@ class ProwlarrSource(ReleaseSource):
         queries = build_search_queries(title, author, isbn)
 
         all_results = []
+        search_errors = []
         seen_urls = set()  # Track unique results by download URL
+        valid_result_found = False
 
         # Try multiple queries to find more results
         # Limit to first 4 queries to avoid excessive API calls
@@ -116,13 +120,16 @@ class ProwlarrSource(ReleaseSource):
                 indexer_ids=self.indexer_ids
             )
 
-            # Search with auto-retry (will try without categories if no results)
             results = self.client.search_with_retry(
                 query=query,
                 categories=categories,
                 indexer_ids=self.indexer_ids,
-                limit=100
+                limit=100,
+                fallback_without_categories=False,
             )
+            last_error = getattr(self.client, "last_error", None)
+            if isinstance(last_error, str) and last_error:
+                search_errors.append(last_error)
 
             if results:
                 # Add only unique results (by download URL)
@@ -135,6 +142,42 @@ class ProwlarrSource(ReleaseSource):
                 # Stop if we have enough results
                 if len(all_results) >= 50:
                     break
+                query_has_valid_result = any(
+                    self._convert_to_release(
+                        result,
+                        format_type,
+                        author,
+                        title,
+                        series,
+                        series_position,
+                    )
+                    for result in results
+                )
+                valid_result_found = valid_result_found or query_has_valid_result
+                if self.stop_after_first_results and query_has_valid_result:
+                    break
+
+        # A single categoryless fallback is enough; retrying every query doubles
+        # load and makes bulk fulfillment unreasonably slow.
+        if not valid_result_found and self.categoryless_fallback and queries and title:
+            fallback_results = self.client.search_with_retry(
+                query=queries[0],
+                categories=None,
+                indexer_ids=self.indexer_ids,
+                limit=100,
+                fallback_without_categories=False,
+            )
+            last_error = getattr(self.client, "last_error", None)
+            if isinstance(last_error, str) and last_error:
+                search_errors.append(last_error)
+            for result in fallback_results:
+                url = result.get("downloadUrl", "")
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    all_results.append(result)
+
+        if not all_results and search_errors:
+            raise RuntimeError("; ".join(dict.fromkeys(search_errors)))
 
         if not all_results:
             logger.info(
@@ -268,7 +311,7 @@ class ProwlarrSource(ReleaseSource):
         # Calculate quality score
         quality = calculate_quality_score(
             parsed,
-            preferred_format=fmt,
+            preferred_format=None,
             min_seeders=1
         )
 

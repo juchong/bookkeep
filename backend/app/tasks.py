@@ -1678,6 +1678,13 @@ async def sync_download_states():
         db.close()
 
 
+async def process_approved_requests():
+    """Search and download a bounded batch of eligible approved requests."""
+    from app.services.request_fulfillment import process_approved_requests as process_requests
+
+    return await process_requests()
+
+
 async def _sync_torrent_downloads(db: Session, tasks: list) -> int:
     """Sync torrent download states from qBittorrent"""
     from app.models import DownloadClient

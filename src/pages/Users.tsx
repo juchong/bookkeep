@@ -118,13 +118,13 @@ export default function Users() {
       setCreateDialogOpen(false);
       resetForm();
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error(error.message || 'Failed to create user');
     },
   });
 
   const updateUserMutation = useMutation({
-    mutationFn: ({ id, update }: { id: number; update: any }) =>
+    mutationFn: ({ id, update }: { id: number; update: Partial<Omit<User, 'id' | 'created_at' | 'total_requests'>> }) =>
       usersApi.update(id, update),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] });
@@ -133,7 +133,7 @@ export default function Users() {
       setSelectedUser(null);
       resetForm();
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error(error.message || 'Failed to update user');
     },
   });
@@ -145,7 +145,7 @@ export default function Users() {
       toast.success('Password reset successfully');
       setResetPassword('');
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error(error.message || 'Failed to reset password');
     },
   });
@@ -158,7 +158,7 @@ export default function Users() {
       setDeleteDialogOpen(false);
       setSelectedUser(null);
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error(error.message || 'Failed to delete user');
     },
   });
@@ -310,7 +310,7 @@ export default function Users() {
           <div className="text-center py-12">
             <div className="text-destructive mb-2 font-medium">Failed to load users</div>
             <div className="text-sm text-muted-foreground">
-              {(error as any)?.message || 'Please check your connection and try again'}
+              {error.message || 'Please check your connection and try again'}
             </div>
           </div>
         ) : filteredUsers.length === 0 ? (

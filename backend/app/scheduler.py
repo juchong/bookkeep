@@ -53,6 +53,11 @@ JOB_DEFINITIONS = {
         "description": "Sync Hardcover to-read/list books and auto-request them",
         "type": "PROCESS",
     },
+    "process_approved_requests": {
+        "default_interval": 15 * 60,
+        "description": "Search for and download approved ebook and audiobook requests",
+        "type": "PROCESS",
+    },
 }
 
 
@@ -299,6 +304,7 @@ async def initialize_jobs():
         sync_missing_metadata,
         sync_download_states,
         sync_hardcover_lists,
+        process_approved_requests,
     )
 
     # Map job names to their async functions
@@ -310,6 +316,7 @@ async def initialize_jobs():
         "sync_missing_metadata": sync_missing_metadata,
         "sync_download_states": sync_download_states,
         "sync_hardcover_lists": sync_hardcover_lists,
+        "process_approved_requests": process_approved_requests,
     }
     
     db = SessionLocal()
@@ -342,4 +349,3 @@ async def initialize_jobs():
         db.rollback()
     finally:
         db.close()
-

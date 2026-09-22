@@ -7,12 +7,25 @@ import structlog
 from app import database, models, schemas
 from app.cache import get_cached, set_cached, delete_cached, make_cache_key, CACHE_TTL, clear_cache_pattern
 from app.auth import get_current_user, require_admin
-from app.downloads import DownloadOrchestrator
 from app.routers.users import get_password_hash
+from app.services.request_fulfillment import (
+    apply_settings_update,
+    get_or_create_settings,
+    get_request_statistics,
+    process_approved_requests,
+    schedule_request_retry,
+    serialize_settings,
+)
 
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+def _ensure_aware(value: Optional[datetime]) -> Optional[datetime]:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 def _normalize_book_genres(book: Optional[models.Book]) -> None:
     if not book or not book.genres or not isinstance(book.genres, str):
@@ -113,6 +126,12 @@ async def create_request(
         db_request.notes = request.notes
         db_request.admin_notes = None
         db_request.edition_id = request.edition_id
+        db_request.auto_search_attempts = 0
+        db_request.last_search_at = None
+        db_request.next_search_at = None
+        db_request.last_search_error = None
+        db_request.search_claimed_at = None
+        db_request.download_task_id = None
         db_request.updated_at = datetime.now(timezone.utc)
         db.add(db_request)
         db.commit()
@@ -137,42 +156,15 @@ async def create_request(
         joinedload(models.BookRequest.user)
     ).filter(models.BookRequest.id == db_request.id).first()
     
-    # Automatically trigger download if auto-approved
+    # Approved requests are claimed by the bounded background fulfillment job.
+    # Searching inline here can block every application request for minutes.
     if auto_approve:
-        try:
-            orchestrator = DownloadOrchestrator(db_session=db)
-            task = orchestrator.search_and_download(
-                book=db_request.book,
-                format_type=db_request.format,
-                source_name="prowlarr"
-            )
-
-            if task:
-                logger.info(
-                    "auto_download_triggered",
-                    request_id=db_request.id,
-                    task_id=task.id,
-                    format=db_request.format
-                )
-                # Update status to processing since download started
-                db_request.status = "processing"
-                db.commit()
-                db.refresh(db_request)
-            else:
-                logger.warning(
-                    "auto_download_no_releases",
-                    request_id=db_request.id,
-                    book_id=db_request.book_id,
-                    format=db_request.format
-                )
-                # Keep as approved but log that no releases found
-        except Exception as e:
-            logger.error(
-                "auto_download_failed",
-                request_id=db_request.id,
-                error=str(e)
-            )
-            # Don't fail the request - just keep it as approved for manual fulfillment
+        logger.info(
+            "auto_download_queued",
+            request_id=db_request.id,
+            book_id=db_request.book_id,
+            format=db_request.format,
+        )
     
     # Convert book.genres from comma-separated string to list for response
     _normalize_book_genres(db_request.book)
@@ -220,6 +212,120 @@ def get_requests(
         _normalize_book_genres(req.book)
     
     return requests
+
+
+@router.get("/page")
+def get_requests_page(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    statuses: Optional[str] = Query(None, description="Comma-separated request statuses"),
+    user_id: Optional[int] = Query(None),
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return a server-filtered request page with its authoritative total."""
+    from sqlalchemy.orm import joinedload
+
+    query = db.query(models.BookRequest)
+    if not current_user.is_admin:
+        query = query.filter(models.BookRequest.user_id == current_user.id)
+    elif user_id:
+        query = query.filter(models.BookRequest.user_id == user_id)
+
+    if statuses:
+        requested_statuses = [value.strip() for value in statuses.split(",") if value.strip()]
+        if requested_statuses:
+            query = query.filter(models.BookRequest.status.in_(requested_statuses))
+
+    total = query.count()
+    requests = query.options(
+        joinedload(models.BookRequest.book),
+        joinedload(models.BookRequest.user),
+    ).order_by(
+        models.BookRequest.created_at.desc(),
+        models.BookRequest.id.desc(),
+    ).offset(skip).limit(limit).all()
+    for request in requests:
+        _normalize_book_genres(request.book)
+    return {"items": requests, "total": total, "skip": skip, "limit": limit}
+
+
+@router.get("/stats")
+def get_request_stats(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Return authoritative request counts for the current user's scope."""
+    return get_request_statistics(db, current_user)
+
+
+@router.get("/automation/settings", response_model=schemas.AutoDownloadSettingsResponse)
+def get_automation_settings(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    return serialize_settings(get_or_create_settings(db))
+
+
+@router.put("/automation/settings", response_model=schemas.AutoDownloadSettingsResponse)
+def update_automation_settings(
+    update: schemas.AutoDownloadSettingsUpdate,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    settings = get_or_create_settings(db)
+    previous_interval = settings.interval_seconds
+    apply_settings_update(settings, update)
+    db.add(settings)
+    db.commit()
+    db.refresh(settings)
+
+    if previous_interval != settings.interval_seconds:
+        from app.scheduler import reschedule_job
+
+        reschedule_job("process_approved_requests", settings.interval_seconds)
+
+    logger.info(
+        "automatic_fulfillment_settings_updated",
+        user_id=current_user.id,
+        enabled=settings.enabled,
+        dry_run=settings.dry_run,
+        interval_seconds=settings.interval_seconds,
+        batch_size=settings.batch_size,
+    )
+    return serialize_settings(settings)
+
+
+@router.get("/automation/status")
+def get_automation_status(
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    from app.scheduler import get_job_info
+
+    settings = get_or_create_settings(db)
+    response = serialize_settings(settings)
+    started = _ensure_aware(settings.last_run_started_at)
+    completed = _ensure_aware(settings.last_run_completed_at)
+    response["running"] = bool(started and (not completed or completed < started))
+    response["job"] = get_job_info("process_approved_requests")
+    return response
+
+
+@router.post("/automation/run", status_code=status.HTTP_202_ACCEPTED)
+async def run_automation(
+    run: schemas.AutoDownloadRunRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(database.get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    settings = get_or_create_settings(db)
+    started = _ensure_aware(settings.last_run_started_at)
+    completed = _ensure_aware(settings.last_run_completed_at)
+    if started and (not completed or completed < started) and datetime.now(timezone.utc) - started < timedelta(hours=1):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Automatic fulfillment is already running")
+    background_tasks.add_task(process_approved_requests, force=True, dry_run=run.dry_run)
+    return {"message": "Automatic fulfillment run queued", "dry_run": run.dry_run}
 
 
 @router.get("/by-book/{book_id}")
@@ -497,47 +603,16 @@ async def request_series(
         db.add(new_request)
         db.flush()  # Get the ID
         
-        # Trigger download if auto-approved
+        # The background fulfillment job handles approved series requests in
+        # bounded batches instead of blocking this request once per book.
         if should_auto_approve:
-            try:
-                orchestrator = DownloadOrchestrator(db_session=db)
-                task = orchestrator.search_and_download(
-                    book=book,
-                    format_type=format,
-                    source_name="prowlarr"
-                )
-
-                if task:
-                    new_request.status = "processing"
-                    logger.info("series_book_download_triggered",
-                               series_id=series_id,
-                               book_id=book.id,
-                               book_title=book.title,
-                               task_id=task.id)
-                else:
-                    logger.warning("series_book_no_releases",
-                                  series_id=series_id,
-                                  book_id=book.id,
-                                  book_title=book.title,
-                                  format=format)
-                    # Keep as approved — can be retried
-            except Exception as e:
-                error_msg = str(e)
-                logger.warning("series_book_download_failed",
-                              series_id=series_id,
-                              book_id=book.id,
-                              book_title=book.title,
-                              error=error_msg)
-
-                new_request.notes = (new_request.notes or "") + f"\n[Error] Download: {error_msg}"
-
-                failed_count += 1
-                failed_books.append({
-                    "title": book.title,
-                    "position": book.series_position,
-                    "error": error_msg
-                })
-                requested_count -= 1
+            logger.info(
+                "series_book_download_queued",
+                series_id=series_id,
+                request_id=new_request.id,
+                book_id=book.id,
+                format=format,
+            )
         
         requested_count += 1
         
@@ -739,55 +814,20 @@ async def update_request(
     
     db.commit()
     
-    # If status changed to approved, trigger download via Prowlarr
+    # Approval makes the request eligible for the bounded background job.
     if status_changing_to_approved:
-        try:
-            # Eager load book relationship
-            from sqlalchemy.orm import joinedload
-            db_request = db.query(models.BookRequest).options(
-                joinedload(models.BookRequest.book)
-            ).filter(models.BookRequest.id == db_request.id).first()
-
-            if not db_request.book:
-                logger.warning("request_approved_no_book", request_id=request_id)
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Cannot approve request: book not found"
-                )
-
-            orchestrator = DownloadOrchestrator(db_session=db)
-            task = orchestrator.search_and_download(
-                book=db_request.book,
-                format_type=db_request.format,
-                source_name="prowlarr"
-            )
-
-            if task:
-                logger.info(
-                    "approval_download_triggered",
-                    request_id=request_id,
-                    task_id=task.id,
-                    format=db_request.format
-                )
-                db_request.status = "processing"
-                db.commit()
-            else:
-                logger.warning(
-                    "approval_download_no_releases",
-                    request_id=request_id,
-                    book_id=db_request.book_id,
-                    format=db_request.format
-                )
-                # Keep as approved — admin can retry
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error("request_approval_error", request_id=request_id, error=str(e))
-            db_request.admin_notes = (
-                (db_request.admin_notes or "") +
-                f"\n[Error] Download search failed: {str(e)}"
-            )
-            db.commit()
+        db_request.auto_search_attempts = 0
+        db_request.last_search_at = None
+        db_request.next_search_at = None
+        db_request.last_search_error = None
+        db_request.search_claimed_at = None
+        db.commit()
+        logger.info(
+            "approval_download_queued",
+            request_id=request_id,
+            book_id=db_request.book_id,
+            format=db_request.format,
+        )
     
     # Eager load relationships
     from sqlalchemy.orm import joinedload
@@ -886,6 +926,25 @@ async def update_processing_requests_status(db: Session) -> None:
                           book_title=req.book.title,
                           format=req.format,
                           task_id=completed_task.id)
+                continue
+
+            failed_task = None
+            if req.download_task_id:
+                failed_task = db.query(models.DownloadTask).filter(
+                    models.DownloadTask.id == req.download_task_id,
+                    models.DownloadTask.state == "error",
+                ).first()
+            if failed_task:
+                settings = get_or_create_settings(db)
+                message = failed_task.message or failed_task.import_message or "Download task failed"
+                schedule_request_retry(req, settings, message, now=now)
+                updated_count += 1
+                logger.info(
+                    "request_download_retry_scheduled",
+                    request_id=req.id,
+                    task_id=failed_task.id,
+                    next_search_at=req.next_search_at.isoformat() if req.next_search_at else None,
+                )
                 continue
 
             # No completed task — check if we should mark as not_found

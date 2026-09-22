@@ -106,7 +106,7 @@ export default function SearchResults() {
               <section>
                 <h2 className="text-lg font-semibold text-foreground mb-4">Series</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {series.map((item: any) => (
+                  {series.map((item) => (
                     <Link
                       key={item.id}
                       to={`/series/${item.id}`}
@@ -131,7 +131,7 @@ export default function SearchResults() {
               <section>
                 <h2 className="text-lg font-semibold text-foreground mb-4">Authors</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {authors.map((author: any) => (
+                  {authors.map((author) => (
                     <Link
                       key={author.name}
                       to={`/author?name=${encodeURIComponent(author.name)}`}

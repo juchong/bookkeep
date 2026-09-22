@@ -15,7 +15,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Download, Search, HardDrive, Wifi, BookOpen, Headphones, CheckCircle, RefreshCw, XCircle, ExternalLink, Globe, FolderInput } from 'lucide-react';
 import { DirectDownloadProgress } from '@/components/books/DirectDownloadProgress';
 import { Progress } from '@/components/ui/progress';
-import { downloadsApi, ReleaseInfo, booksApi, directDownloadApi } from '@/lib/api';
+import { downloadsApi, ReleaseInfo, SearchResponse, booksApi, directDownloadApi } from '@/lib/api';
 import { toast } from 'sonner';
 
 interface SearchReleaseDialogProps {
@@ -181,7 +181,7 @@ export function SearchReleaseDialog({
 
     setDownloadStates((prev) => {
       const newMap = new Map(prev);
-      downloadTasks.forEach((task: any) => {
+      downloadTasks.forEach((task) => {
         // Use loose equality to handle number vs string
         if (task.book_id == bookId && task.download_url) {
           // Set state based on task state
@@ -262,23 +262,23 @@ export function SearchReleaseDialog({
   useEffect(() => {
     if (!downloadTasks || downloadTasks.length === 0) return;
 
-    const completedTasks = downloadTasks.filter((t: any) =>
-      ['complete', 'seeding'].includes(t.state) &&
-      t.import_status === 'imported' &&
-      t.book_id == bookId &&  // Use loose equality
-      !completedTasksRef.current.has(t.id)
+    const completedTasks = downloadTasks.filter((task) =>
+      ['complete', 'seeding'].includes(task.state) &&
+      task.import_status === 'imported' &&
+      task.book_id == bookId &&  // Use loose equality
+      !completedTasksRef.current.has(task.id)
     );
 
     if (completedTasks.length > 0) {
       // Mark tasks as seen
-      completedTasks.forEach((t: any) => completedTasksRef.current.add(t.id));
+      completedTasks.forEach((task) => completedTasksRef.current.add(task.id));
 
       // Update download states to 'complete'
       setDownloadStates((prev) => {
         const newMap = new Map(prev);
-        completedTasks.forEach((t: any) => {
-          if (t.download_url) {
-            newMap.set(t.download_url, 'complete');
+        completedTasks.forEach((task) => {
+          if (task.download_url) {
+            newMap.set(task.download_url, 'complete');
           }
         });
         return newMap;
@@ -341,7 +341,7 @@ export function SearchReleaseDialog({
   // Helper function to render release results for a specific format
   const renderReleaseResults = (
     formatType: 'ebook' | 'audiobook',
-    searchResults: any,
+    searchResults: SearchResponse | undefined,
     isSearching: boolean,
     searchError: Error | null
   ) => {
@@ -397,9 +397,9 @@ export function SearchReleaseDialog({
         </div>
         {searchResults.releases.map((release: ReleaseInfo, index: number) => {
           // Find the task in the tasks list - use loose equality for book_id
-          const task = downloadTasks.find((t: any) =>
-            t.book_id == bookId &&
-            t.download_url === release.download_url
+          const task = downloadTasks.find((downloadTask) =>
+            downloadTask.book_id == bookId &&
+            downloadTask.download_url === release.download_url
           );
 
           // Get download state from our state map

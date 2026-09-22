@@ -39,6 +39,11 @@ _GENERIC_SUBTITLE_WORDS = {"book", "edition", "novel", "novella", "series", "vol
 
 
 def _title_tokens(value: str) -> list[str]:
+    # Release payloads frequently remove spaces while preserving CamelCase
+    # (for example, ``ExitPartyANovel.m4b``). Restore those word boundaries
+    # before case-folding so a valid payload is not rejected at import time.
+    value = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    value = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", value)
     value = re.sub(r"[\(\[].*?[\)\]]", " ", value)
     value = re.sub(r"['\u2019]s\b", "", value, flags=re.IGNORECASE)
     value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode().casefold()
@@ -171,7 +176,11 @@ class DownloadOrchestrator:
         self,
         book: Book,
         format_type: str = "ebook",
-        source_name: str = "prowlarr"
+        source_name: str = "prowlarr",
+        *,
+        raise_errors: bool = False,
+        categoryless_fallback: bool = True,
+        stop_after_first_results: bool = False,
     ) -> List[Release]:
         """
         Search for book releases.
@@ -187,6 +196,9 @@ class DownloadOrchestrator:
         db = self.db_session or SessionLocal()
         try:
             source = get_source(source_name, db_session=db)
+            if source_name == "prowlarr" and hasattr(source, "categoryless_fallback"):
+                source.categoryless_fallback = categoryless_fallback
+                source.stop_after_first_results = stop_after_first_results
 
             logger.info(
                 "orchestrator_search",
@@ -232,6 +244,8 @@ class DownloadOrchestrator:
                 book_id=book.id,
                 error=str(e)
             )
+            if raise_errors:
+                raise
             return []
         finally:
             if not self.db_session:
@@ -241,7 +255,8 @@ class DownloadOrchestrator:
         self,
         book: Book,
         release: Release,
-        format_type: str
+        format_type: str,
+        request_id: Optional[int] = None,
     ) -> Optional[DownloadTask]:
         """
         Create a download task from a release.
@@ -291,11 +306,15 @@ class DownloadOrchestrator:
 
             task = DownloadTask(
                 book_id=book.id,
+                request_id=request_id,
                 format=format_type,
                 source=release.source,
                 release_title=release.title,
                 download_url=release.download_url,
                 protocol=release.protocol,
+                indexer=release.indexer,
+                indexer_id=release.indexer_id,
+                size_bytes=release.size_bytes,
                 state="queued",
                 progress=0.0,
                 release_data_json=json.dumps(release_data, default=json_serializer),

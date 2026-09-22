@@ -69,7 +69,7 @@ export default function Profile() {
   });
 
   // Filter requests for current user
-  const userRequests = requests.filter((r: any) => r.user_id === user?.id);
+  const userRequests = requests.filter((request) => request.user_id === user?.id);
   const recentRequests = userRequests.slice(0, 10);
 
   // Password change mutation
@@ -82,7 +82,7 @@ export default function Profile() {
       setNewPassword('');
       setConfirmPassword('');
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error('Failed to change password', {
         description: error.message || 'Please check your current password and try again.',
       });
@@ -124,7 +124,7 @@ export default function Profile() {
       queryClient.invalidateQueries({ queryKey: ['hardcoverSyncConfig'] });
       queryClient.invalidateQueries({ queryKey: ['hardcoverLists'] });
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error('Failed to update Hardcover sync', { description: error.message });
     },
   });
@@ -135,7 +135,7 @@ export default function Profile() {
       toast.success('Sync started', { description: data.message });
       queryClient.invalidateQueries({ queryKey: ['hardcoverSyncConfig'] });
     },
-    onError: (error: any) => {
+    onError: (error: Error) => {
       toast.error('Sync failed', { description: error.message });
     },
   });
@@ -283,7 +283,7 @@ export default function Profile() {
           </Card>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            {recentRequests.map((request: any) => (
+            {recentRequests.map((request) => (
               <div
                 key={request.id}
                 className="group relative rounded-lg overflow-hidden cursor-pointer card-hover"
@@ -637,4 +637,3 @@ export default function Profile() {
     </div>
   );
 }
-

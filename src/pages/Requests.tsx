@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Clock, CheckCircle, XCircle, Loader2, Trash2, User, CheckCircle2, Library, Inbox } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, Loader2, Trash2, CheckCircle2, Library, Inbox, Search, RotateCw } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -10,6 +10,46 @@ import { toast } from 'sonner';
 import { Link } from 'react-router-dom';
 import { useUser } from '@/contexts/UserContext';
 import type { BookRequest } from '@/types/book';
+import { AutomationControls } from '@/components/requests/AutomationControls';
+
+const PAGE_SIZE = 50;
+
+interface RawRequestBook {
+  id: number;
+  title?: string;
+  author?: string;
+  cover_url?: string;
+  description?: string;
+  published_date?: string;
+  genres?: string | string[];
+  rating?: number;
+  series?: string;
+  series_position?: number;
+  hardcover_id?: number;
+  hardcover_slug?: string;
+  isbn?: string;
+  page_count?: number;
+}
+
+interface RawBookRequest {
+  id: number;
+  book_id: number;
+  book?: RawRequestBook;
+  user_id: number;
+  user?: { username?: string; full_name?: string };
+  format: 'ebook' | 'audiobook';
+  status: BookRequest['status'];
+  source?: 'user_request' | 'booklore_import';
+  notes?: string;
+  admin_notes?: string;
+  auto_search_attempts?: number;
+  last_search_at?: string;
+  next_search_at?: string;
+  last_search_error?: string;
+  download_task_id?: number;
+  created_at: string;
+  updated_at: string;
+}
 
 const statusConfig = {
   requested: { label: 'Requested', className: 'status-requested', icon: Clock },
@@ -61,6 +101,7 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
     mutationFn: () => requestsApi.delete(Number(request.id)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['requests'] });
+      queryClient.invalidateQueries({ queryKey: ['request-stats'] });
       toast.success('Request deleted');
     },
     onError: (error: Error) => {
@@ -74,6 +115,7 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
     mutationFn: () => requestsApi.update(Number(request.id), { status: 'available' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['requests'] });
+      queryClient.invalidateQueries({ queryKey: ['request-stats'] });
       toast.success('Request marked as available');
     },
     onError: (error: Error) => {
@@ -196,6 +238,24 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
             </p>
           )}
 
+          {request.status === 'approved' && (request.autoSearchAttempts || request.nextSearchAt) && (
+            <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-left">
+              <p className="text-xs font-medium text-amber-400">
+                Automatic search attempt {request.autoSearchAttempts ?? 0}
+              </p>
+              {request.nextSearchAt && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Retry scheduled {new Date(request.nextSearchAt).toLocaleString()}
+                </p>
+              )}
+              {request.lastSearchError && (
+                <p className="mt-1 line-clamp-2 text-xs text-muted-foreground" title={request.lastSearchError}>
+                  {request.lastSearchError}
+                </p>
+              )}
+            </div>
+          )}
+
           {/* Action buttons */}
           <div className="flex flex-col gap-2 pt-2">
             {isProcessing && isAdmin && (
@@ -229,28 +289,38 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
 
 export default function Requests() {
   const [activeTab, setActiveTab] = useState('all');
+  const [page, setPage] = useState(0);
+  const { isAdmin } = useUser();
 
   const statusFilter = activeTab === 'all'
     ? undefined
     : activeTab === 'pending'
     ? 'pending'
     : activeTab === 'approved'
-    ? undefined
+    ? 'approved,processing'
     : activeTab;
 
-  const { data: requests = [], isLoading } = useQuery({
-    queryKey: ['requests', statusFilter],
-    queryFn: () => requestsApi.getAll(0, 100, statusFilter),
+  const { data: pageData, isLoading } = useQuery({
+    queryKey: ['requests', statusFilter, page],
+    queryFn: () => requestsApi.getPage(page * PAGE_SIZE, PAGE_SIZE, statusFilter),
     refetchInterval: (query) => {
-      const data = query.state.data;
-      const hasProcessing = Array.isArray(data) && data.some((req: any) => req.status === 'processing');
+      const data = query.state.data?.items;
+      const hasProcessing = Array.isArray(data) && data.some((req) => (req as RawBookRequest).status === 'processing');
       return hasProcessing ? 10000 : false;
     },
   });
 
+  const { data: stats } = useQuery({
+    queryKey: ['request-stats'],
+    queryFn: requestsApi.getStats,
+    refetchInterval: 30000,
+  });
+
+  const requests = (pageData?.items ?? []) as RawBookRequest[];
+
   const transformedRequests: BookRequest[] = requests
-    .filter((req: any) => req.book)
-    .map((req: any) => ({
+    .filter((req): req is RawBookRequest & { book: RawRequestBook } => Boolean(req.book))
+    .map((req) => ({
       id: String(req.id),
       bookId: String(req.book?.hardcover_id || req.book_id),
       book: {
@@ -276,19 +346,34 @@ export default function Requests() {
       source: req.source || 'user_request',
       notes: req.notes,
       adminNotes: req.admin_notes,
+      autoSearchAttempts: req.auto_search_attempts,
+      lastSearchAt: req.last_search_at,
+      nextSearchAt: req.next_search_at,
+      lastSearchError: req.last_search_error,
+      downloadTaskId: req.download_task_id,
       createdAt: req.created_at,
       updatedAt: req.updated_at,
     }));
+  const filteredRequests = transformedRequests;
+  const totalPages = Math.max(1, Math.ceil((pageData?.total ?? 0) / PAGE_SIZE));
 
-  const filterRequests = (status: string) => {
-    if (status === 'all') return transformedRequests;
-    if (status === 'pending') return transformedRequests.filter((r) => r.status === 'pending');
-    if (status === 'approved') return transformedRequests.filter((r) => ['approved', 'processing'].includes(r.status));
-    if (status === 'available') return transformedRequests.filter((r) => r.status === 'available');
-    return transformedRequests;
+  const chooseTab = (value: string) => {
+    setActiveTab(value);
+    setPage(0);
   };
 
-  const filteredRequests = filterRequests(activeTab);
+  const statCards = [
+    { label: 'Total', value: stats?.total ?? 0, tab: 'all', icon: Library },
+    { label: 'Pending approval', value: stats?.pending ?? 0, tab: 'pending', icon: Clock },
+    { label: 'Approved / queued', value: stats?.approved ?? 0, tab: 'approved', icon: CheckCircle },
+    { label: 'Eligible now', value: stats?.eligible_for_auto_search ?? 0, tab: 'approved', icon: Search },
+    { label: 'Retry scheduled', value: stats?.waiting_for_retry ?? 0, tab: 'approved', icon: RotateCw },
+    { label: 'Processing', value: stats?.processing ?? 0, tab: 'processing', icon: Loader2 },
+    { label: 'Available', value: stats?.available ?? 0, tab: 'available', icon: CheckCircle2 },
+    { label: 'Not found', value: stats?.not_found ?? 0, tab: 'not_found', icon: XCircle },
+    { label: 'Denied', value: stats?.denied ?? 0, tab: 'denied', icon: XCircle },
+    { label: 'Processed', value: stats?.processed ?? 0, tab: 'all', icon: CheckCircle },
+  ];
 
   return (
     <div className="space-y-8">
@@ -308,9 +393,28 @@ export default function Requests() {
         </p>
       </div>
 
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+        {statCards.map(({ label, value, tab, icon: Icon }) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => chooseTab(tab)}
+            className="rounded-xl border border-border/50 bg-card p-4 text-left transition-colors hover:border-primary/40 hover:bg-card/80"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">{label}</span>
+              <Icon className="h-4 w-4 text-primary" />
+            </div>
+            <p className="mt-2 text-2xl font-bold text-foreground">{value}</p>
+          </button>
+        ))}
+      </div>
+
+      {isAdmin && <AutomationControls />}
+
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="h-12 p-1.5 bg-card/50 border border-border/50 rounded-xl">
+      <Tabs value={activeTab} onValueChange={chooseTab}>
+        <TabsList className="h-auto flex-wrap p-1.5 bg-card/50 border border-border/50 rounded-xl">
           <TabsTrigger value="all" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
             All
           </TabsTrigger>
@@ -320,8 +424,17 @@ export default function Requests() {
           <TabsTrigger value="approved" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
             Approved
           </TabsTrigger>
+          <TabsTrigger value="processing" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            Processing
+          </TabsTrigger>
           <TabsTrigger value="available" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
             Available
+          </TabsTrigger>
+          <TabsTrigger value="not_found" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            Not Found
+          </TabsTrigger>
+          <TabsTrigger value="denied" className="h-9 px-4 rounded-lg data-[state=active]:bg-primary data-[state=active]:text-primary-foreground">
+            Denied
           </TabsTrigger>
         </TabsList>
 
@@ -345,10 +458,27 @@ export default function Requests() {
               </Button>
             </div>
           ) : (
-            <div className="space-y-4">
-              {filteredRequests.map((request, index) => (
-                <RequestRow key={request.id} request={request} index={index} />
-              ))}
+            <div className="space-y-6">
+              <div className="space-y-4">
+                {filteredRequests.map((request, index) => (
+                  <RequestRow key={request.id} request={request} index={index} />
+                ))}
+              </div>
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between rounded-xl border border-border/50 bg-card/50 p-3">
+                  <p className="text-sm text-muted-foreground">
+                    Page {page + 1} of {totalPages} · {pageData?.total ?? 0} requests
+                  </p>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage((value) => Math.max(0, value - 1))}>
+                      Previous
+                    </Button>
+                    <Button variant="outline" size="sm" disabled={page + 1 >= totalPages} onClick={() => setPage((value) => value + 1)}>
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </TabsContent>

@@ -42,26 +42,8 @@ import {
 } from '@/components/ui/table';
 import { toast } from 'sonner';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { settingsApi, readarrApi, jobsApi, bookloreApi, audiobookshelfApi, downloadSettingsApi, type BookloreServer, type AudiobookshelfServer, type ProwlarrServer, type DownloadClient, type OidcSettingsResponse } from '@/lib/api';
+import { settingsApi, readarrApi, jobsApi, bookloreApi, audiobookshelfApi, downloadSettingsApi, type ReadarrServer, type ReadarrServerInput, type BookloreServer, type BookloreTestResponse, type AudiobookshelfServer, type AudiobookshelfTestResponse, type ProwlarrServer, type DownloadClient, type OidcSettingsResponse } from '@/lib/api';
 import { usePageVisibility } from '@/hooks/usePageVisibility';
-
-interface ReadarrServer {
-  id: number;
-  name: string;
-  hostname: string;
-  port: number;
-  use_ssl: boolean;
-  api_key: string;
-  url_base?: string;
-  is_default: boolean;
-  is_audiobook: boolean;
-  ebook_quality_profile_id?: number;
-  ebook_root_folder?: string;
-  ebook_tags?: string;
-  audiobook_quality_profile_id?: number;
-  audiobook_root_folder?: string;
-  audiobook_tags?: string;
-}
 
 interface Job {
   name: string;
@@ -188,7 +170,7 @@ function OidcSettingsCard() {
       toast.success('OIDC settings saved');
       queryClient.invalidateQueries({ queryKey: ['oidc-settings'] });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast.error('Failed to save OIDC settings', { description: err.message });
     },
   });
@@ -198,7 +180,7 @@ function OidcSettingsCard() {
     onSuccess: (data) => {
       toast.success('OIDC connection successful', { description: `Issuer: ${data.issuer}` });
     },
-    onError: (err: any) => {
+    onError: (err: Error) => {
       toast.error('OIDC connection failed', { description: err.message });
     },
   });
@@ -431,7 +413,7 @@ export default function Settings() {
   const [editingBookloreServer, setEditingBookloreServer] = useState<BookloreServer | null>(null);
   const [showBooklorePassword, setShowBooklorePassword] = useState(false);
   const [testingBookloreConnection, setTestingBookloreConnection] = useState(false);
-  const [bookloreTestResult, setBookloreTestResult] = useState<{ success: boolean; libraries?: any[]; error?: string } | null>(null);
+  const [bookloreTestResult, setBookloreTestResult] = useState<BookloreTestResponse | null>(null);
   const [bookloreLibraries, setBookloreLibraries] = useState<Array<{ id: number; name: string }>>([]);
   const [bookloreForm, setBookloreForm] = useState<BookloreServerForm>({
     name: '',
@@ -448,7 +430,7 @@ export default function Settings() {
   const [editingAudiobookshelfServer, setEditingAudiobookshelfServer] = useState<AudiobookshelfServer | null>(null);
   const [showAudiobookshelfApiKey, setShowAudiobookshelfApiKey] = useState(false);
   const [testingAudiobookshelfConnection, setTestingAudiobookshelfConnection] = useState(false);
-  const [audiobookshelfTestResult, setAudiobookshelfTestResult] = useState<{ success: boolean; libraries?: any[]; error?: string } | null>(null);
+  const [audiobookshelfTestResult, setAudiobookshelfTestResult] = useState<AudiobookshelfTestResponse | null>(null);
   const [audiobookshelfLibraries, setAudiobookshelfLibraries] = useState<Array<{ id: string; name: string; mediaType: string }>>([]);
   const [audiobookshelfForm, setAudiobookshelfForm] = useState<AudiobookshelfServerForm>({
     name: '',
@@ -510,10 +492,10 @@ export default function Settings() {
       try {
         const result = await jobsApi.getAll();
         return result;
-      } catch (err: any) {
+      } catch (err: unknown) {
         console.error('Jobs API error:', err);
         // If it's a 404, the route might not be registered (server needs restart)
-        if (err?.message?.includes('404') || err?.message?.includes('Not Found')) {
+        if (err instanceof Error && (err.message.includes('404') || err.message.includes('Not Found'))) {
           throw new Error('Jobs endpoint not found. Please restart the backend server to load the jobs router.');
         }
         throw err;
@@ -600,7 +582,7 @@ export default function Settings() {
 
   // Create/Update server mutation
   const saveServerMutation = useMutation({
-    mutationFn: (server: any) => {
+    mutationFn: (server: ReadarrServerInput) => {
       if (editingServer) {
         return readarrApi.update(editingServer.id, server);
       }
@@ -799,9 +781,9 @@ export default function Settings() {
       toast.success(result.message, {
         description: `Cleared ${result.deleted_count} cached entries`,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Failed to clear cache', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
       setClearingCache(null);
@@ -815,9 +797,9 @@ export default function Settings() {
       toast.success(result.message, {
         description: `Cleared ${result.total_deleted} total cached entries`,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Failed to clear cache', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
     } finally {
       setClearingCache(null);
@@ -834,9 +816,9 @@ export default function Settings() {
           : 'No keys found in cache',
         duration: 10000,
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Failed to debug cache', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
     }
   };
@@ -1000,9 +982,9 @@ export default function Settings() {
           description: result.error,
         });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Connection test failed', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
       setAudiobookshelfTestResult(null);
     } finally {
@@ -1052,9 +1034,9 @@ export default function Settings() {
           description: result.error,
         });
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Connection test failed', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
       setBookloreTestResult(null);
     } finally {
@@ -1153,9 +1135,9 @@ export default function Settings() {
         });
         setTestResults(null);
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast.error('Connection test failed', {
-        description: error.message,
+        description: error instanceof Error ? error.message : 'Unknown error',
       });
       setTestResults(null);
     } finally {
@@ -1186,26 +1168,17 @@ export default function Settings() {
     const cleanHostname = serverForm.hostname.replace(/^https?:\/\//, '').split(':')[0].split('/')[0];
 
     // Prepare payload - ensure numbers are integers, not NaN
-    const payload: any = {
+    const payload: ReadarrServerInput = {
       ...serverForm,
       hostname: cleanHostname,
+      ebook_quality_profile_id: Number.isFinite(serverForm.ebook_quality_profile_id)
+        ? Number(serverForm.ebook_quality_profile_id)
+        : null,
+      audiobook_quality_profile_id: Number.isFinite(serverForm.audiobook_quality_profile_id)
+        ? Number(serverForm.audiobook_quality_profile_id)
+        : null,
+      port: Number(serverForm.port),
     };
-
-    // Clean up undefined/NaN values and ensure integers
-    if (payload.ebook_quality_profile_id === undefined || isNaN(payload.ebook_quality_profile_id)) {
-      payload.ebook_quality_profile_id = null;
-    } else {
-      payload.ebook_quality_profile_id = parseInt(payload.ebook_quality_profile_id.toString(), 10);
-    }
-
-    if (payload.audiobook_quality_profile_id === undefined || isNaN(payload.audiobook_quality_profile_id)) {
-      payload.audiobook_quality_profile_id = null;
-    } else {
-      payload.audiobook_quality_profile_id = parseInt(payload.audiobook_quality_profile_id.toString(), 10);
-    }
-
-    // Ensure port is an integer
-    payload.port = parseInt(payload.port.toString(), 10);
 
     saveServerMutation.mutate(payload);
   };

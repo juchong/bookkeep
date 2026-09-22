@@ -35,7 +35,7 @@ export default function SeriesDetail() {
   const isWholePosition = (position?: number | null) =>
     typeof position === 'number' && Number.isFinite(position) && Math.floor(position) === position;
   const originalBooks = allBooks.filter((book) =>
-    isWholePosition((book as any).position ?? book.seriesPosition)
+    isWholePosition(book.position ?? book.seriesPosition)
   );
   const books = seriesView === 'original' ? originalBooks : allBooks;
 
@@ -308,9 +308,9 @@ export default function SeriesDetail() {
               {booksWithAvailability.map((book, index) => (
                 <div key={book.id} className="flex-shrink-0 w-[140px] sm:w-[160px] relative">
                 {/* Position Badge */}
-                {((book as any).position ?? book.seriesPosition) != null && (
+                {(book.position ?? book.seriesPosition) != null && (
                   <div className="absolute -top-2.5 -left-2.5 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-primary text-primary-foreground text-xs font-bold shadow-lg ring-2 ring-background">
-                    {(book as any).position ?? book.seriesPosition}
+                    {book.position ?? book.seriesPosition}
                   </div>
                 )}
                 <BookCard

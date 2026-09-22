@@ -99,9 +99,10 @@ export default function DirectDownloadSettings() {
       } else {
         toast.error(result.message || 'Connection failed');
       }
-    } catch (error: any) {
-      setTestResult({ success: false, providers_count: 0, providers_status: {}, message: error.message });
-      toast.error('Test failed', { description: error.message });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setTestResult({ success: false, providers_count: 0, providers_status: {}, message });
+      toast.error('Test failed', { description: message });
     } finally {
       setTestingConnection(false);
     }
@@ -129,9 +130,10 @@ export default function DirectDownloadSettings() {
       } else {
         toast.error(result.message || 'FlareSolverr connection failed');
       }
-    } catch (error: any) {
-      setFlaresolverrResult({ success: false, message: error.message });
-      toast.error('Test failed', { description: error.message });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      setFlaresolverrResult({ success: false, message });
+      toast.error('Test failed', { description: message });
     } finally {
       setTestingFlaresolverr(false);
     }

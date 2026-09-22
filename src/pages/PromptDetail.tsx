@@ -57,7 +57,7 @@ export default function PromptDetail() {
     const books: ReturnType<typeof transformHardcoverBook>[] = [];
     for (const page of data.pages) {
       const pageBooks = (page.prompt?.prompt_books || [])
-        .map((entry: any) => entry?.book ? transformHardcoverBook(entry.book) : null)
+        .map((entry) => entry?.book ? transformHardcoverBook(entry.book) : null)
         .filter((book): book is ReturnType<typeof transformHardcoverBook> => Boolean(book));
       books.push(...pageBooks);
     }

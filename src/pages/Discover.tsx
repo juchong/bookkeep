@@ -25,8 +25,8 @@ export default function Discover() {
   });
 
   const recentRequests: BookRequest[] = requests
-    .filter((req: any) => req.book)
-    .map((req: any) => ({
+    .filter((request) => request.book)
+    .map((req) => ({
       id: String(req.id),
       bookId: String(req.book?.hardcover_id || req.book_id),
       book: {

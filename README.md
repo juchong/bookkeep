@@ -8,6 +8,8 @@ Bookkeep is a self-hosted library companion for discovering books, exploring ser
 - Search books, authors, and series
 - Author detail pages with bio, portrait, books, and series
 - Book and series request flows
+- Configurable automatic fulfillment of approved ebook and audiobook requests
+- Server-side request statistics, filtering, and fulfillment retry visibility
 - Admin tooling for users, requests, and settings
 
 ## Screenshots
@@ -291,6 +293,7 @@ Bookkeep runs background jobs via APScheduler. You can view and change schedules
 Default jobs:
 - `refresh_seed_data` (daily): pulls fresh books from Hardcover to keep the local catalog populated.
 - `check_processing_requests` (every 5 minutes): checks for request status changes and updates requests that have completed.
+- `process_approved_requests` (every 15 minutes): evaluates a bounded batch of approved requests against the configured format, language, protocol, size, seeder, and score criteria, then starts the best eligible download or schedules a retry. It is disabled and in dry-run mode by default; administrators configure and preview it from the Requests page.
 - `sync_from_booklore` (daily): syncs availability from Booklore, importing items and marking matching requests as available.
 - `sync_missing_metadata` (every 6 hours): fills missing metadata (cover, rating, IDs, series) using Hardcover.
 

@@ -40,8 +40,8 @@ export default function Admin() {
 
   // Filter out requests without books to prevent UI issues
   const requests: BookRequest[] = requestsData
-    .filter((req: any) => req.book) // Only include requests with associated books
-    .map((req: any) => ({
+    .filter((request) => request.book) // Only include requests with associated books
+    .map((req) => ({
       id: String(req.id),
       bookId: String(req.book?.hardcover_id || req.book_id),
       book: {

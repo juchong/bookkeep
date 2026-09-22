@@ -1,3 +1,5 @@
+import type { HardcoverBook } from '@/lib/hardcover';
+
 // Use relative paths when served from same origin
 const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:8000');
 
@@ -109,6 +111,103 @@ export function isBackendAvailable(): boolean | null {
   return backendAvailable;
 }
 
+export interface HardcoverSearchSeries {
+  id: number;
+  name: string;
+  books_count?: number;
+}
+
+export interface HardcoverSearchAuthor {
+  name: string;
+  books_count: number;
+}
+
+export interface HardcoverAuthor {
+  id: number;
+  name: string;
+  slug?: string;
+  bio?: string;
+  image_url?: string;
+}
+
+export interface HardcoverAuthorSeries {
+  id: number;
+  name: string;
+  books_count?: number;
+}
+
+export interface HardcoverSeriesDetail {
+  id: number;
+  name: string;
+  author?: { name?: string } | null;
+  books_count?: number;
+  book_series?: Array<{ position?: number | null; book?: HardcoverBook }>;
+}
+
+export interface HardcoverPrompt {
+  slug?: string;
+  question?: string;
+  description?: string;
+  answers_count?: number;
+  books_count?: number;
+  prompt_books?: Array<{ book?: HardcoverBook }>;
+}
+
+export interface HardcoverPromptSummary {
+  answers_count?: number;
+  prompt?: HardcoverPrompt;
+  book?: HardcoverBook;
+}
+
+export interface ApiBook {
+  id: number;
+  title: string;
+  author: string;
+  isbn?: string | null;
+  description?: string | null;
+  cover_url?: string | null;
+  genre?: string | null;
+  published_date?: string | null;
+  rating?: number | null;
+  page_count?: number | null;
+  hardcover_id?: number | null;
+  hardcover_slug?: string | null;
+  default_edition_id?: number | null;
+  default_physical_edition_id?: number | null;
+  default_ebook_edition_id?: number | null;
+  default_audio_edition_id?: number | null;
+  series?: string | null;
+  series_id?: number | null;
+  series_position?: number | null;
+  genres?: string[] | string | null;
+  ebook_available?: boolean;
+  audiobook_available?: boolean;
+  created_at?: string;
+  updated_at?: string | null;
+}
+
+export type ApiBookInput = Omit<ApiBook, 'id' | 'created_at' | 'updated_at'>;
+
+export interface ApiBookRequest {
+  id: number;
+  book_id: number;
+  user_id: number;
+  format: 'ebook' | 'audiobook';
+  status: 'pending' | 'approved' | 'denied' | 'processing' | 'available' | 'not_found';
+  source?: 'user_request' | 'booklore_import';
+  notes?: string | null;
+  admin_notes?: string | null;
+  auto_search_attempts?: number;
+  last_search_at?: string | null;
+  next_search_at?: string | null;
+  last_search_error?: string | null;
+  download_task_id?: number | null;
+  created_at: string;
+  updated_at?: string | null;
+  book?: ApiBook | null;
+  user?: ApiUser | null;
+}
+
 async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {},
@@ -172,7 +271,7 @@ async function apiRequest<T>(
 // Hardcover API endpoints
 export const hardcoverApi = {
   search: (query: string, limit: number = 20) =>
-    apiRequest<{ books: any[] }>(`/api/hardcover/search?query=${encodeURIComponent(query)}&limit=${limit}`),
+    apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/search?query=${encodeURIComponent(query)}&limit=${limit}`),
 
   searchGrouped: (
     query: string,
@@ -186,7 +285,7 @@ export const hardcoverApi = {
     if (options?.cacheOnly) {
       params.set('cache_only', 'true');
     }
-    return apiRequest<{ series: any[]; authors: any[]; books: any[] }>(
+    return apiRequest<{ series: HardcoverSearchSeries[]; authors: HardcoverSearchAuthor[]; books: HardcoverBook[] }>(
       `/api/hardcover/search-grouped?${params.toString()}`
     );
   },
@@ -197,7 +296,7 @@ export const hardcoverApi = {
       params.set('bypass_cache', 'true');
     }
     const query = params.toString();
-    return apiRequest<{ books_by_pk: any }>(
+    return apiRequest<{ books_by_pk: HardcoverBook | null }>(
       `/api/hardcover/details/${bookId}${query ? `?${query}` : ''}`
     );
   },
@@ -227,17 +326,17 @@ export const hardcoverApi = {
   },
 
   getTrending: (limit: number = 20) =>
-    apiRequest<{ books: any[] }>(`/api/hardcover/trending?limit=${limit}`),
+    apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/trending?limit=${limit}`),
 
   getPopular: (limit: number = 20) =>
-    apiRequest<{ books: any[] }>(`/api/hardcover/popular?limit=${limit}`),
+    apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/popular?limit=${limit}`),
 
   getNewReleases: (limit: number = 20, minRatings: number = 5) => {
     const params = new URLSearchParams({
       limit: String(limit),
       min_ratings: String(minRatings),
     });
-    return apiRequest<{ books: any[] }>(`/api/hardcover/new-releases?${params}`);
+    return apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/new-releases?${params}`);
   },
 
   getSeries: (seriesId: number, options?: { bypassCache?: boolean }) => {
@@ -246,31 +345,31 @@ export const hardcoverApi = {
       params.set('bypass_cache', 'true');
     }
     const query = params.toString();
-    return apiRequest<{ series_by_pk: any }>(
+    return apiRequest<{ series_by_pk: HardcoverSeriesDetail | null }>(
       `/api/hardcover/series/${seriesId}${query ? `?${query}` : ''}`
     );
   },
 
   rebuildSeries: (seriesId: number) =>
-    apiRequest<{ series_by_pk: any }>(`/api/hardcover/series/${seriesId}/rebuild`, {
+    apiRequest<{ series_by_pk: HardcoverSeriesDetail | null }>(`/api/hardcover/series/${seriesId}/rebuild`, {
       method: 'POST',
     }),
 
   getSimilar: (bookId: number, limit: number = 10) =>
-    apiRequest<{ books: any[] }>(`/api/hardcover/similar/${bookId}?limit=${limit}`),
+    apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/similar/${bookId}?limit=${limit}`),
 
   getBookPrompts: (bookId: number, promptLimit: number = 6, booksLimit: number = 30) =>
-    apiRequest<{ prompt_summaries: any[] }>(
+    apiRequest<{ prompt_summaries: HardcoverPromptSummary[] }>(
       `/api/hardcover/prompts/${bookId}?prompt_limit=${promptLimit}&books_limit=${booksLimit}`
     ),
 
   getPromptBySlug: (slug: string, limit: number = 1000, offset: number = 0, bypassCache: boolean = false) =>
-    apiRequest<{ prompt: any }>(
+    apiRequest<{ prompt: HardcoverPrompt }>(
       `/api/hardcover/prompt/${encodeURIComponent(slug)}?limit=${limit}&offset=${offset}&bypass_cache=${bypassCache}`
     ),
 
   getByAuthor: (bookId: number, limit: number = 10) =>
-    apiRequest<{ books: any[] }>(`/api/hardcover/by-author/${bookId}?limit=${limit}`),
+    apiRequest<{ books: HardcoverBook[] }>(`/api/hardcover/by-author/${bookId}?limit=${limit}`),
 
   getPopularSeries: (limit: number = 20, minTotalRatings: number = 500, offset: number = 0) => {
     const params = new URLSearchParams({
@@ -278,7 +377,7 @@ export const hardcoverApi = {
       min_total_ratings: String(minTotalRatings),
     });
     if (offset > 0) params.set('offset', String(offset));
-    return apiRequest<{ series: any[] }>(`/api/hardcover/popular-series?${params}`);
+    return apiRequest<{ series: Array<{ id: number; name: string; books_count: number; owned_count?: number; first_book?: HardcoverBook }>; total: number; has_more: boolean; offset: number; limit: number }>(`/api/hardcover/popular-series?${params}`);
   },
 
   getAuthor: (
@@ -296,10 +395,10 @@ export const hardcoverApi = {
     if (options?.series_limit != null) params.set('series_limit', String(options.series_limit));
     if (options?.series_offset != null) params.set('series_offset', String(options.series_offset));
     return apiRequest<{
-      author: any;
-      books: any[];
+      author: HardcoverAuthor | null;
+      books: HardcoverBook[];
       books_total: number;
-      series: any[];
+      series: HardcoverAuthorSeries[];
       series_total: number;
     }>(`/api/hardcover/author?${params.toString()}`);
   },
@@ -308,19 +407,19 @@ export const hardcoverApi = {
 // Books API endpoints
 export const booksApi = {
   getAll: (skip: number = 0, limit: number = 100) =>
-    apiRequest<Array<any>>(`/api/books/?skip=${skip}&limit=${limit}`),
+    apiRequest<ApiBook[]>(`/api/books/?skip=${skip}&limit=${limit}`),
 
   getById: (id: number) =>
-    apiRequest<any>(`/api/books/${id}`),
+    apiRequest<ApiBook>(`/api/books/${id}`),
 
-  create: (book: any) =>
-    apiRequest<any>('/api/books/', {
+  create: (book: ApiBookInput) =>
+    apiRequest<ApiBook>('/api/books/', {
       method: 'POST',
       body: JSON.stringify(book),
     }),
 
-  update: (id: number, book: any) =>
-    apiRequest<any>(`/api/books/${id}`, {
+  update: (id: number, book: Partial<ApiBookInput>) =>
+    apiRequest<ApiBook>(`/api/books/${id}`, {
       method: 'PUT',
       body: JSON.stringify(book),
     }),
@@ -346,20 +445,48 @@ export const requestsApi = {
     });
     if (status) params.append('status_filter', status);
     if (userId) params.append('user_id', String(userId));
-    return apiRequest<Array<any>>(`/api/requests/?${params}`);
+    return apiRequest<ApiBookRequest[]>(`/api/requests/?${params}`);
   },
 
+  getPage: (skip: number = 0, limit: number = 50, statuses?: string) => {
+    const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+    if (statuses) params.append('statuses', statuses);
+    return apiRequest<{ items: ApiBookRequest[]; total: number; skip: number; limit: number }>(
+      `/api/requests/page?${params}`
+    );
+  },
+
+  getStats: () => apiRequest<RequestStatistics>('/api/requests/stats'),
+
+  getAutomationSettings: () =>
+    apiRequest<AutoDownloadSettings>('/api/requests/automation/settings'),
+
+  updateAutomationSettings: (settings: AutoDownloadSettingsUpdate) =>
+    apiRequest<AutoDownloadSettings>('/api/requests/automation/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings),
+    }),
+
+  getAutomationStatus: () =>
+    apiRequest<AutoDownloadStatus>('/api/requests/automation/status'),
+
+  runAutomation: (dryRun: boolean) =>
+    apiRequest<{ message: string; dry_run: boolean }>('/api/requests/automation/run', {
+      method: 'POST',
+      body: JSON.stringify({ dry_run: dryRun }),
+    }),
+
   getById: (id: number) =>
-    apiRequest<any>(`/api/requests/${id}`),
+    apiRequest<ApiBookRequest>(`/api/requests/${id}`),
 
   create: (request: { book_id: number; format: string; notes?: string; edition_id?: number }) =>
-    apiRequest<any>('/api/requests/', {
+    apiRequest<ApiBookRequest>('/api/requests/', {
       method: 'POST',
       body: JSON.stringify(request),
     }),
 
   update: (id: number, update: { status?: string; admin_notes?: string }) =>
-    apiRequest<any>(`/api/requests/${id}`, {
+    apiRequest<ApiBookRequest>(`/api/requests/${id}`, {
       method: 'PUT',
       body: JSON.stringify(update),
     }),
@@ -424,6 +551,53 @@ export const requestsApi = {
       method: 'DELETE',
     }),
 };
+
+export interface RequestStatistics {
+  total: number;
+  pending: number;
+  approved: number;
+  processing: number;
+  available: number;
+  not_found: number;
+  denied: number;
+  processed: number;
+  eligible_for_auto_search: number;
+  waiting_for_retry: number;
+  stale_available: number;
+  by_format: Record<'ebook' | 'audiobook', Record<string, number>>;
+}
+
+export interface AutoDownloadSettingsUpdate {
+  enabled: boolean;
+  dry_run: boolean;
+  process_existing_backlog: boolean;
+  interval_seconds: number;
+  batch_size: number;
+  max_active_downloads: number;
+  minimum_score: number;
+  ebook_formats: string[];
+  audiobook_formats: string[];
+  preferred_languages: string[];
+  protocol_order: string[];
+  minimum_seeders: number;
+  ebook_min_size_mb: number;
+  ebook_max_size_mb: number;
+  audiobook_min_size_mb: number;
+  audiobook_max_size_mb: number;
+  retry_schedule_seconds: number[];
+  categoryless_fallback: boolean;
+}
+
+export interface AutoDownloadSettings extends AutoDownloadSettingsUpdate {
+  last_run_started_at: string | null;
+  last_run_completed_at: string | null;
+  last_run_summary: Record<string, unknown> | null;
+}
+
+export interface AutoDownloadStatus extends AutoDownloadSettings {
+  running: boolean;
+  job: { next_run_time?: string; interval_seconds?: number } | null;
+}
 
 // User type for the API
 export interface ApiUser {
@@ -533,7 +707,7 @@ export const usersApi = {
   getById: (id: number) =>
     apiRequest<ApiUser>(`/api/users/${id}`),
 
-  update: (id: number, update: any) =>
+  update: (id: number, update: Partial<Pick<ApiUser, 'email' | 'username' | 'full_name' | 'is_active' | 'is_admin' | 'can_request_ebook' | 'can_request_audiobook' | 'can_download' | 'auto_approve_ebooks' | 'auto_approve_audiobooks'>>) =>
     apiRequest<ApiUser>(`/api/users/${id}`, {
       method: 'PUT',
       body: JSON.stringify(update),
@@ -615,21 +789,43 @@ export const settingsApi = {
 };
 
 // Readarr API endpoints
+export interface ReadarrServer {
+  id: number;
+  name: string;
+  hostname: string;
+  port: number;
+  use_ssl: boolean;
+  api_key: string;
+  url_base?: string | null;
+  is_default: boolean;
+  is_audiobook: boolean;
+  ebook_quality_profile_id?: number | null;
+  ebook_root_folder?: string | null;
+  ebook_tags?: string | null;
+  audiobook_quality_profile_id?: number | null;
+  audiobook_root_folder?: string | null;
+  audiobook_tags?: string | null;
+  created_at?: string;
+  updated_at?: string | null;
+}
+
+export type ReadarrServerInput = Omit<ReadarrServer, 'id' | 'created_at' | 'updated_at'>;
+
 export const readarrApi = {
   getAll: () =>
-    apiRequest<Array<any>>('/api/readarr/'),
+    apiRequest<ReadarrServer[]>('/api/readarr/'),
 
   getById: (id: number) =>
-    apiRequest<any>(`/api/readarr/${id}`),
+    apiRequest<ReadarrServer>(`/api/readarr/${id}`),
 
-  create: (server: any) =>
-    apiRequest<any>('/api/readarr/', {
+  create: (server: ReadarrServerInput) =>
+    apiRequest<ReadarrServer>('/api/readarr/', {
       method: 'POST',
       body: JSON.stringify(server),
     }),
 
-  update: (id: number, server: any) =>
-    apiRequest<any>(`/api/readarr/${id}`, {
+  update: (id: number, server: Partial<ReadarrServerInput>) =>
+    apiRequest<ReadarrServer>(`/api/readarr/${id}`, {
       method: 'PUT',
       body: JSON.stringify(server),
     }),
@@ -785,10 +981,10 @@ export const bookloreApi = {
     }),
 
   getBooks: (serverId: number) =>
-    apiRequest<Array<any>>(`/api/booklore/${serverId}/books`),
+    apiRequest<Array<Record<string, unknown>>>(`/api/booklore/${serverId}/books`),
 
   checkBook: (serverId: number, hardcoverId: number) =>
-    apiRequest<{ available: boolean; book?: any }>(`/api/booklore/${serverId}/check/${hardcoverId}`),
+    apiRequest<{ available: boolean; book?: Record<string, unknown> }>(`/api/booklore/${serverId}/check/${hardcoverId}`),
 };
 
 // Audiobookshelf API endpoints
@@ -839,7 +1035,7 @@ export const audiobookshelfApi = {
     }),
 
   getItems: (serverId: number) =>
-    apiRequest<Array<any>>(`/api/audiobookshelf/${serverId}/items`),
+    apiRequest<Array<Record<string, unknown>>>(`/api/audiobookshelf/${serverId}/items`),
 };
 
 // Download Settings API endpoints
@@ -887,7 +1083,14 @@ export interface DownloadClient {
 export interface ProwlarrTestResponse {
   success: boolean;
   error?: string;
-  indexers?: Array<any>;
+  indexers?: Array<{
+    id: number;
+    name: string;
+    protocol: string;
+    privacy: string;
+    enable?: boolean;
+    enabled?: boolean;
+  }>;
   total_indexers?: number;
 }
 

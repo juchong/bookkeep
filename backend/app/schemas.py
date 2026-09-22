@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from datetime import datetime
 from typing import Optional, List
 
@@ -148,6 +148,11 @@ class BookRequestResponse(BaseModel):
     readarr_search_status_code: Optional[int] = None
     readarr_message: Optional[str] = None
     edition_id: Optional[int] = None
+    auto_search_attempts: int = 0
+    last_search_at: Optional[datetime] = None
+    next_search_at: Optional[datetime] = None
+    last_search_error: Optional[str] = None
+    download_task_id: Optional[int] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
     book: Optional[BookResponse] = None
@@ -155,6 +160,78 @@ class BookRequestResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class AutoDownloadSettingsUpdate(BaseModel):
+    enabled: bool = False
+    dry_run: bool = True
+    process_existing_backlog: bool = True
+    interval_seconds: int = Field(default=900, ge=300, le=604800)
+    batch_size: int = Field(default=5, ge=1, le=50)
+    max_active_downloads: int = Field(default=10, ge=1, le=100)
+    minimum_score: float = Field(default=70.0, ge=0, le=100)
+    ebook_formats: List[str] = Field(default_factory=lambda: ["epub", "azw3", "mobi", "pdf"])
+    audiobook_formats: List[str] = Field(default_factory=lambda: ["m4b", "mp3", "flac"])
+    preferred_languages: List[str] = Field(default_factory=lambda: ["en"])
+    protocol_order: List[str] = Field(default_factory=lambda: ["usenet", "torrent"])
+    minimum_seeders: int = Field(default=1, ge=0, le=10000)
+    ebook_min_size_mb: float = Field(default=0.1, ge=0)
+    ebook_max_size_mb: float = Field(default=500.0, gt=0)
+    audiobook_min_size_mb: float = Field(default=10.0, ge=0)
+    audiobook_max_size_mb: float = Field(default=5000.0, gt=0)
+    retry_schedule_seconds: List[int] = Field(
+        default_factory=lambda: [900, 3600, 21600, 86400],
+        min_length=1,
+        max_length=10,
+    )
+    categoryless_fallback: bool = True
+
+    @field_validator("ebook_formats", "audiobook_formats", "preferred_languages", "protocol_order")
+    @classmethod
+    def normalize_string_lists(cls, value: List[str]) -> List[str]:
+        normalized = []
+        for item in value:
+            item = item.strip().lower()
+            if item and item not in normalized:
+                normalized.append(item)
+        if not normalized:
+            raise ValueError("At least one value is required")
+        return normalized
+
+    @field_validator("protocol_order")
+    @classmethod
+    def validate_protocols(cls, value: List[str]) -> List[str]:
+        unsupported = set(value) - {"torrent", "usenet"}
+        if unsupported:
+            raise ValueError(f"Unsupported protocols: {', '.join(sorted(unsupported))}")
+        return value
+
+    @field_validator("retry_schedule_seconds")
+    @classmethod
+    def validate_retry_schedule(cls, value: List[int]) -> List[int]:
+        if any(delay < 60 or delay > 604800 for delay in value):
+            raise ValueError("Retry delays must be between 60 seconds and 7 days")
+        if any(delay < value[index - 1] for index, delay in enumerate(value) if index > 0):
+            raise ValueError("Retry delays must stay the same or increase over time")
+        return value
+
+    @model_validator(mode="after")
+    def validate_size_ranges(self):
+        if self.ebook_min_size_mb >= self.ebook_max_size_mb:
+            raise ValueError("Ebook minimum size must be lower than maximum size")
+        if self.audiobook_min_size_mb >= self.audiobook_max_size_mb:
+            raise ValueError("Audiobook minimum size must be lower than maximum size")
+        return self
+
+
+class AutoDownloadSettingsResponse(AutoDownloadSettingsUpdate):
+    last_run_started_at: Optional[datetime] = None
+    last_run_completed_at: Optional[datetime] = None
+    last_run_summary: Optional[dict] = None
+
+
+class AutoDownloadRunRequest(BaseModel):
+    dry_run: bool = True
 
 # Hardcover API schemas
 class HardcoverAuthor(BaseModel):

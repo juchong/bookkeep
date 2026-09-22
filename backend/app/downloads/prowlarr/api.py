@@ -41,6 +41,7 @@ class ProwlarrClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.last_error: Optional[str] = None
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -115,6 +116,7 @@ class ProwlarrClient:
             "categories": [{"id": 7000, "name": "Books/Ebook"}]
         }
         """
+        self.last_error = None
         params = {
             "query": query,
             "limit": limit,
@@ -152,6 +154,7 @@ class ProwlarrClient:
             return results
 
         except requests.exceptions.Timeout:
+            self.last_error = f"Prowlarr search timed out after {self.timeout} seconds"
             logger.error(
                 "prowlarr_search_timeout",
                 query=query,
@@ -159,6 +162,7 @@ class ProwlarrClient:
             )
             return []
         except requests.exceptions.HTTPError as e:
+            self.last_error = f"Prowlarr returned HTTP {e.response.status_code}"
             logger.error(
                 "prowlarr_search_http_error",
                 query=query,
@@ -167,6 +171,7 @@ class ProwlarrClient:
             )
             return []
         except Exception as e:
+            self.last_error = f"Prowlarr search failed: {e}"
             logger.error(
                 "prowlarr_search_error",
                 query=query,
@@ -180,7 +185,8 @@ class ProwlarrClient:
         categories: Optional[List[int]] = None,
         indexer_ids: Optional[List[int]] = None,
         limit: int = 100,
-        max_retries: int = 2
+        max_retries: int = 2,
+        fallback_without_categories: bool = True,
     ) -> List[Dict]:
         """
         Search with automatic retry on failure.
@@ -206,7 +212,7 @@ class ProwlarrClient:
         )
 
         # If no results and categories were specified, retry without categories
-        if not results and categories:
+        if not results and categories and fallback_without_categories:
             logger.info(
                 "prowlarr_retry_without_categories",
                 query=query,

@@ -37,7 +37,7 @@ export default function BookDetails() {
     queryFn: async () => {
       if (!hardcoverId) return null;
       const books = await booksApi.getAll(0, 1000);
-      return books.find((b: any) => b.hardcover_id === hardcoverId) || null;
+      return books.find((candidate) => candidate.hardcover_id === hardcoverId) || null;
     },
     enabled: hasHardcoverId,
     staleTime: 30_000,
@@ -480,7 +480,7 @@ export default function BookDetails() {
               {promptSummaries.map((summary, index) => {
                 const prompt = summary.prompt;
                 const promptBooks = (prompt?.prompt_books || [])
-                  .map((entry: any) => entry?.book ? transformHardcoverBook(entry.book) : null)
+                  .map((entry) => entry?.book ? transformHardcoverBook(entry.book) : null)
                   .filter((book): book is ReturnType<typeof transformHardcoverBook> => Boolean(book));
                 const defaultVisible = Math.min(10, promptBooks.length);
                 const visibleBooks = promptBooks.slice(0, defaultVisible);

@@ -9,6 +9,7 @@ export interface Book {
   rating: number;
   series?: string;
   seriesPosition?: number;
+  position?: number;
   seriesId?: number;
   isbn?: string;
   pageCount?: number;
@@ -32,6 +33,11 @@ export interface BookRequest {
   source?: 'user_request' | 'booklore_import';
   notes?: string;
   adminNotes?: string;
+  autoSearchAttempts?: number;
+  lastSearchAt?: string;
+  nextSearchAt?: string;
+  lastSearchError?: string;
+  downloadTaskId?: number;
   readarrReceived?: boolean;
   readarrSearchTriggered?: boolean;
   readarrSearchStatusCode?: number;

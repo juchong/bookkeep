@@ -1,22 +1,32 @@
+import type { Book } from '@/types/book';
+
 export interface HardcoverBook {
   id: number;
   title: string;
-  slug: string;
-  release_year: number;
+  slug?: string;
+  release_year?: number;
   release_date?: string;
-  pages: number;
-  description: string;
+  pages?: number;
+  description?: string;
   cached_image: {
-    id: number;
-    url: string;
+    id?: number;
+    url?: string;
     color?: string;
     width?: number;
     height?: number;
   } | null;
-  cached_contributors: Array<{ author: { name: string } }>;
-  rating: number;
-  ratings_count: number;
-  users_count: number;
+  cached_contributors?: Array<{
+    author?: { name?: string };
+    name?: string;
+    contribution?: string | null;
+  }>;
+  rating?: number;
+  ratings_count?: number;
+  users_count?: number;
+  activities_count?: number;
+  default_edition_id?: number;
+  ebook_available?: boolean;
+  audiobook_available?: boolean;
   book_series?: Array<{
     series_id?: number;
     position: number;
@@ -110,7 +120,7 @@ export async function getPopularSeries(
 }
 
 // Helper to transform Hardcover book to our app's Book format
-export function transformHardcoverBook(hcBook: HardcoverBook) {
+export function transformHardcoverBook(hcBook: HardcoverBook): Book {
   // Get authors from contributions, filtering by role if multiple contributors
   let authors: string[] = [];
   if (hcBook.contributions && hcBook.contributions.length > 0) {
@@ -129,8 +139,8 @@ export function transformHardcoverBook(hcBook: HardcoverBook) {
   } else if (hcBook.cached_contributors) {
     // Fallback to cached_contributors
     authors = hcBook.cached_contributors
-      .map((c: any) => c.author?.name || c.name)
-      .filter(Boolean);
+      .map((contributor) => contributor.author?.name || contributor.name)
+      .filter((name): name is string => Boolean(name));
   }
   
   const series = hcBook.book_series?.[0];
@@ -161,11 +171,11 @@ export function transformHardcoverBook(hcBook: HardcoverBook) {
     pageCount: hcBook.pages,
     hardcoverId: hcBook.id,
     hardcoverSlug: hcBook.slug,
-    defaultEditionId: (hcBook as any).default_edition_id,
+    defaultEditionId: hcBook.default_edition_id,
     usersCount: hcBook.users_count,
-    activitiesCount: (hcBook as any).activities_count,
-    ebookAvailable: (hcBook as any).ebook_available || false,
-    audiobookAvailable: (hcBook as any).audiobook_available || false,
+    activitiesCount: hcBook.activities_count,
+    ebookAvailable: hcBook.ebook_available || false,
+    audiobookAvailable: hcBook.audiobook_available || false,
   };
 }
 
@@ -183,7 +193,7 @@ export function normalizeSeriesBooks(
       position: entry.position ?? entry.book.book_series?.[0]?.position ?? undefined,
     };
     if (seriesContext) {
-      (transformed as any).seriesId = seriesContext.id;
+      transformed.seriesId = seriesContext.id;
       transformed.series = seriesContext.name;
     }
     if (transformed.position == null) {

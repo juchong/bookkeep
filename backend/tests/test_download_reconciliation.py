@@ -230,6 +230,7 @@ def test_payload_match_accepts_named_file_and_nested_pack(tmp_path):
 
 def test_payload_match_accepts_verified_title_variants(tmp_path):
     files = {
+        "Exit Party": tmp_path / "ExitPartyANovel.m4b",
         "The Consuming Fire (Unabridged)": tmp_path / "The Consuming Fire - John Scalzi.epub",
         "The Butcher's Masquerade": tmp_path / "Butchers Masquerade.epub",
         "Ender's Shadow": tmp_path / "Enders Shadow (Unabridged).m4b",

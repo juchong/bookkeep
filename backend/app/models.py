@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, BigInteger, Index, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -107,6 +107,13 @@ class BookRequest(Base):
     readarr_search_triggered = Column(Boolean, nullable=True)  # Deprecated
     readarr_search_status_code = Column(Integer, nullable=True)  # Deprecated
     readarr_message = Column(Text, nullable=True)  # Deprecated
+    auto_search_attempts = Column(Integer, default=0, nullable=False)
+    last_search_at = Column(DateTime(timezone=True), nullable=True)
+    next_search_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_search_error = Column(Text, nullable=True)
+    search_claimed_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    # Indexed denormalized pointer; DownloadTask.request_id is the authoritative FK.
+    download_task_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -256,9 +263,19 @@ class ProwlarrServer(Base):
 class DownloadTask(Base):
     """Download task tracking - replaces Readarr dependency"""
     __tablename__ = "download_tasks"
+    __table_args__ = (
+        Index(
+            "uq_download_tasks_active_request",
+            "request_id",
+            unique=True,
+            postgresql_where=text("request_id IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
+            sqlite_where=text("request_id IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     book_id = Column(Integer, ForeignKey("books.id"), nullable=False, index=True)
+    request_id = Column(Integer, ForeignKey("book_requests.id", ondelete="SET NULL"), nullable=True, index=True)
     format = Column(String, nullable=False)  # "ebook" or "audiobook"
 
     # Release information
@@ -309,6 +326,55 @@ class DownloadTask(Base):
 
     # Relationships
     book = relationship("Book", back_populates="download_tasks")
+
+
+class AutoDownloadSettings(Base):
+    """Singleton configuration for automatic approved-request fulfillment."""
+    __tablename__ = "auto_download_settings"
+
+    id = Column(Integer, primary_key=True, default=1)
+    enabled = Column(Boolean, default=False, nullable=False)
+    dry_run = Column(Boolean, default=True, nullable=False)
+    process_existing_backlog = Column(Boolean, default=True, nullable=False)
+    interval_seconds = Column(Integer, default=900, nullable=False)
+    batch_size = Column(Integer, default=5, nullable=False)
+    max_active_downloads = Column(Integer, default=10, nullable=False)
+    minimum_score = Column(Float, default=70.0, nullable=False)
+    ebook_formats_json = Column(Text, default='["epub", "azw3", "mobi", "pdf"]', nullable=False)
+    audiobook_formats_json = Column(Text, default='["m4b", "mp3", "flac"]', nullable=False)
+    preferred_languages_json = Column(Text, default='["en"]', nullable=False)
+    protocol_order_json = Column(Text, default='["usenet", "torrent"]', nullable=False)
+    minimum_seeders = Column(Integer, default=1, nullable=False)
+    ebook_min_size_mb = Column(Float, default=0.1, nullable=False)
+    ebook_max_size_mb = Column(Float, default=500.0, nullable=False)
+    audiobook_min_size_mb = Column(Float, default=10.0, nullable=False)
+    audiobook_max_size_mb = Column(Float, default=5000.0, nullable=False)
+    retry_schedule_json = Column(Text, default='[900, 3600, 21600, 86400]', nullable=False)
+    categoryless_fallback = Column(Boolean, default=True, nullable=False)
+    last_run_started_at = Column(DateTime(timezone=True), nullable=True)
+    last_run_completed_at = Column(DateTime(timezone=True), nullable=True)
+    last_run_summary_json = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class FulfillmentAttempt(Base):
+    """Audit record for an automatic request-fulfillment decision."""
+    __tablename__ = "fulfillment_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    request_id = Column(Integer, ForeignKey("book_requests.id", ondelete="CASCADE"), nullable=False, index=True)
+    download_task_id = Column(Integer, ForeignKey("download_tasks.id", ondelete="SET NULL"), nullable=True)
+    dry_run = Column(Boolean, default=False, nullable=False)
+    outcome = Column(String(32), nullable=False, index=True)
+    candidate_count = Column(Integer, default=0, nullable=False)
+    selected_release_title = Column(Text, nullable=True)
+    selected_score = Column(Float, nullable=True)
+    score_details_json = Column(Text, nullable=True)
+    message = Column(Text, nullable=True)
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class UserHardcoverSync(Base):
