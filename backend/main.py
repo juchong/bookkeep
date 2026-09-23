@@ -11,6 +11,7 @@ import os
 from app.database import engine, Base
 from app.routers import users, books, hardcover, requests, settings, readarr, jobs, booklore, audiobookshelf, auth, download_settings, downloads, direct_downloads, oidc, hardcover_sync
 from app import cache
+from app.static_files import resolve_static_file
 
 # Configure Python's standard logging to emit structlog-style console output.
 shared_processors = [
@@ -168,15 +169,9 @@ if os.path.exists(static_dir):
             raise HTTPException(status_code=404, detail="Not Found")
         
         # Check if it's a static file that exists (like favicon.ico, robots.txt, etc.)
-        file_full_path = os.path.join(static_dir, full_path)
-        if os.path.isfile(file_full_path):
-            # Security check: ensure the file is within static_dir
-            try:
-                if os.path.commonpath([static_dir, file_full_path]) == static_dir:
-                    return FileResponse(file_full_path)
-            except ValueError:
-                # Paths don't share a common base, reject
-                pass
+        file_full_path = resolve_static_file(static_dir, full_path)
+        if file_full_path:
+            return FileResponse(file_full_path)
         
         # For all SPA routes (like /series, /book/123, etc.), serve index.html
         index_path = os.path.join(static_dir, "index.html")
