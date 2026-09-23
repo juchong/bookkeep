@@ -202,15 +202,21 @@ async def oidc_callback(
 
         id_token_raw = token_response.get("id_token")
         if id_token_raw and jwks_uri:
-            from jose import jwt as jose_jwt, JWTError
+            import jwt as pyjwt
             import httpx as _httpx
             async with _httpx.AsyncClient() as http:
                 jwks_resp = await http.get(jwks_uri, timeout=10.0)
                 jwks = jwks_resp.json()
             try:
-                id_claims = jose_jwt.decode(
+                token_header = pyjwt.get_unverified_header(id_token_raw)
+                key_data = next(
+                    key for key in jwks.get("keys", [])
+                    if key.get("kid") == token_header.get("kid")
+                )
+                signing_key = pyjwt.PyJWK.from_dict(key_data).key
+                id_claims = pyjwt.decode(
                     id_token_raw,
-                    jwks,
+                    signing_key,
                     algorithms=["RS256", "ES256"],
                     audience=client_id,
                     options={"verify_at_hash": False, "verify_iss": False},
@@ -223,7 +229,7 @@ async def oidc_callback(
                 if token_nonce != expected_nonce:
                     logger.warning("oidc_nonce_mismatch", expected=expected_nonce[:8], got=token_nonce[:8])
                     return RedirectResponse(url="/login?error=nonce_mismatch", status_code=302)
-            except JWTError as jwt_err:
+            except (pyjwt.PyJWTError, KeyError, StopIteration, ValueError) as jwt_err:
                 logger.warning("oidc_id_token_validation_failed", error=str(jwt_err))
                 return RedirectResponse(url="/login?error=id_token_invalid", status_code=302)
 

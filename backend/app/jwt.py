@@ -4,7 +4,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from jose import JWTError, jwt
+import jwt
 from pydantic import BaseModel
 
 
@@ -104,7 +104,7 @@ def decode_token(token: str) -> Optional[TokenData]:
             is_admin=is_admin,
             token_type=token_type,
         )
-    except (JWTError, ValueError, TypeError):
+    except (jwt.PyJWTError, ValueError, TypeError):
         return None
 
 
