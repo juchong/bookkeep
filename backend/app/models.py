@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Foreign
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
+from app.encryption import EncryptedString
 
 class User(Base):
     __tablename__ = "users"
@@ -139,7 +140,7 @@ class ReadarrServer(Base):
     hostname = Column(String, nullable=False)
     port = Column(Integer, nullable=False, default=8787)
     use_ssl = Column(Boolean, default=False)
-    api_key = Column(String, nullable=False)
+    api_key = Column(EncryptedString, nullable=False)
     url_base = Column(String, nullable=True)  # Optional URL base path
     is_default = Column(Boolean, default=False)  # Default server for ebook format
     is_audiobook = Column(Boolean, default=False)  # True for audiobook server, False for ebook
@@ -162,14 +163,14 @@ class BookloreServer(Base):
     name = Column(String, nullable=False)
     url = Column(String, nullable=False)  # Full URL like https://booklore.example.com
     username = Column(String, nullable=False)
-    password = Column(String, nullable=False)  # Stored encrypted/hashed
+    password = Column(EncryptedString, nullable=False)
     is_default = Column(Boolean, default=False)
     # Library-to-format mapping (Booklore library IDs)
     ebook_library_id = Column(Integer, nullable=True)
     audiobook_library_id = Column(Integer, nullable=True)
     # Cached JWT tokens
-    access_token = Column(Text, nullable=True)
-    refresh_token = Column(Text, nullable=True)
+    access_token = Column(EncryptedString, nullable=True)
+    refresh_token = Column(EncryptedString, nullable=True)
     token_expires_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -181,7 +182,7 @@ class AudiobookshelfServer(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     url = Column(String, nullable=False)  # Full URL like https://abs.example.com
-    api_key = Column(String, nullable=False)
+    api_key = Column(EncryptedString, nullable=False)
     is_default = Column(Boolean, default=False)
     library_id = Column(String, nullable=True)  # ABS library UUID; null = scan all libraries
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -216,8 +217,8 @@ class DownloadClient(Base):
     port = Column(Integer, nullable=False)
     use_ssl = Column(Boolean, default=False)
     username = Column(String, nullable=True)
-    password = Column(String, nullable=True)  # TODO: Encrypt this
-    api_key = Column(String, nullable=True)  # API key for SABnzbd and similar clients
+    password = Column(EncryptedString, nullable=True)
+    api_key = Column(EncryptedString, nullable=True)  # API key for SABnzbd and similar clients
     url_base = Column(String, nullable=True)  # URL base path for reverse proxy setups
 
     # Configuration
@@ -246,7 +247,7 @@ class ProwlarrServer(Base):
     host = Column(String, nullable=False)
     port = Column(Integer, nullable=False, default=9696)
     use_ssl = Column(Boolean, default=False)
-    api_key = Column(String, nullable=False)
+    api_key = Column(EncryptedString, nullable=False)
     url_base = Column(String, nullable=True)
 
     # Configuration
@@ -395,7 +396,7 @@ class UserHardcoverSync(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)
-    hardcover_api_token = Column(String, nullable=True)  # encrypted, user's personal token
+    hardcover_api_token = Column(EncryptedString, nullable=True)
     sync_to_read = Column(Boolean, default=True)  # watch status_id: 1 (to-read)
     sync_list_ids = Column(Text, nullable=True)  # JSON array of Hardcover list IDs
     default_format = Column(String, default="ebook")  # ebook | audiobook | both
@@ -423,7 +424,7 @@ class DirectDownloadSettings(Base):
     # Z-Library settings
     zlibrary_enabled = Column(Boolean, default=False)
     zlibrary_email = Column(String, nullable=True)
-    zlibrary_password = Column(String, nullable=True)  # TODO: Encrypt
+    zlibrary_password = Column(EncryptedString, nullable=True)
     zlibrary_domain = Column(String, nullable=True)  # Custom domain
 
     # Rate limiting

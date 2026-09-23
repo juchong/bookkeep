@@ -143,6 +143,21 @@ class DownloadClientTestRequest(BaseModel):
     url_base: Optional[str] = None
 
 
+def _prowlarr_response(server: ProwlarrServer) -> ProwlarrServerResponse:
+    return ProwlarrServerResponse(
+        id=server.id,
+        name=server.name,
+        host=server.host,
+        port=server.port,
+        use_ssl=server.use_ssl,
+        api_key="***MASKED***",
+        url_base=server.url_base,
+        enabled=server.enabled,
+        is_default=server.is_default,
+        indexer_ids=_parse_indexer_ids(server.indexer_ids_json),
+    )
+
+
 # Prowlarr endpoints
 @router.get("/prowlarr", response_model=List[ProwlarrServerResponse])
 def get_prowlarr_servers(db: Session = Depends(get_db), current_user: models.User = Depends(require_admin)):
@@ -152,18 +167,7 @@ def get_prowlarr_servers(db: Session = Depends(get_db), current_user: models.Use
     # Convert to response with parsed indexer_ids
     responses = []
     for server in servers:
-        responses.append(ProwlarrServerResponse(
-            id=server.id,
-            name=server.name,
-            host=server.host,
-            port=server.port,
-            use_ssl=server.use_ssl,
-            api_key=server.api_key,
-            url_base=server.url_base,
-            enabled=server.enabled,
-            is_default=server.is_default,
-            indexer_ids=_parse_indexer_ids(server.indexer_ids_json)
-        ))
+        responses.append(_prowlarr_response(server))
     return responses
 
 
@@ -216,19 +220,7 @@ def create_prowlarr_server(
     logger.info("prowlarr_server_created", server_id=db_server.id, name=db_server.name)
 
     # Convert response to include parsed indexer_ids
-    response = ProwlarrServerResponse(
-        id=db_server.id,
-        name=db_server.name,
-        host=db_server.host,
-        port=db_server.port,
-        use_ssl=db_server.use_ssl,
-        api_key=db_server.api_key,
-        url_base=db_server.url_base,
-        enabled=db_server.enabled,
-        is_default=db_server.is_default,
-        indexer_ids=_parse_indexer_ids(db_server.indexer_ids_json)
-    )
-    return response
+    return _prowlarr_response(db_server)
 
 
 @router.put("/prowlarr/{server_id}", response_model=ProwlarrServerResponse)
@@ -269,19 +261,7 @@ def update_prowlarr_server(
     logger.info("prowlarr_server_updated", server_id=db_server.id)
 
     # Convert response to include parsed indexer_ids
-    response = ProwlarrServerResponse(
-        id=db_server.id,
-        name=db_server.name,
-        host=db_server.host,
-        port=db_server.port,
-        use_ssl=db_server.use_ssl,
-        api_key=db_server.api_key,
-        url_base=db_server.url_base,
-        enabled=db_server.enabled,
-        is_default=db_server.is_default,
-        indexer_ids=_parse_indexer_ids(db_server.indexer_ids_json)
-    )
-    return response
+    return _prowlarr_response(db_server)
 
 
 @router.delete("/prowlarr/{server_id}")

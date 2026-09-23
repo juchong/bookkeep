@@ -61,7 +61,11 @@ export default function ProwlarrSettings() {
   const saveServerMutation = useMutation({
     mutationFn: async (data: ProwlarrForm) => {
       if (editingServer) {
-        return downloadSettingsApi.updateProwlarrServer(editingServer.id, data);
+        const { api_key, ...settings } = data;
+        return downloadSettingsApi.updateProwlarrServer(
+          editingServer.id,
+          api_key ? { ...settings, api_key } : settings,
+        );
       } else {
         return downloadSettingsApi.createProwlarrServer(data);
       }
@@ -136,7 +140,7 @@ export default function ProwlarrSettings() {
         host: server.host,
         port: server.port,
         use_ssl: server.use_ssl,
-        api_key: server.api_key,
+        api_key: '',
         url_base: server.url_base || '',
         enabled: server.enabled,
         is_default: server.is_default,
@@ -150,7 +154,7 @@ export default function ProwlarrSettings() {
         host: server.host,
         port: server.port,
         use_ssl: server.use_ssl,
-        api_key: server.api_key,
+        api_key: '',
         url_base: server.url_base || '',
         enabled: server.enabled,
         is_default: server.is_default,
@@ -209,7 +213,7 @@ export default function ProwlarrSettings() {
   };
 
   const handleSave = () => {
-    if (!form.name || !form.host || !form.api_key) {
+    if (!form.name || !form.host || (!editingServer && !form.api_key)) {
       toast.error('Please fill in all required fields');
       return;
     }
