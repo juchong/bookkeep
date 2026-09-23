@@ -29,7 +29,7 @@ from . import (
 )
 from ..models import AutoDownloadSettings, Book, BookRequest, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
 from ..database import SessionLocal
-from .outbound import configured_release_hosts, validate_outbound_url
+from .outbound import UnsafeDownloadUrl, configured_release_hosts, validate_outbound_url
 
 logger = structlog.get_logger()
 
@@ -380,7 +380,7 @@ class DownloadOrchestrator:
 
             return task
 
-        except (DownloadCapacityError, DuplicateDownloadError):
+        except (DownloadCapacityError, DuplicateDownloadError, UnsafeDownloadUrl):
             db.rollback()
             raise
         except IntegrityError as e:
