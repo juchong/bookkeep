@@ -293,7 +293,7 @@ class DownloadTask(Base):
     # Release information
     source = Column(String, nullable=False)  # "prowlarr", "manual"
     release_title = Column(String, nullable=True)
-    download_url = Column(String, nullable=True)
+    download_url = Column(EncryptedString, nullable=True)
     protocol = Column(String, nullable=True)  # "torrent" or "usenet"
     indexer = Column(String, nullable=True)
     indexer_id = Column(Integer, nullable=True)
@@ -320,7 +320,7 @@ class DownloadTask(Base):
     client_state = Column(String(50), nullable=True)  # Raw state from client (e.g., "stalledDL", "uploading")
 
     # Full release data (JSON blob)
-    release_data_json = Column(Text, nullable=True)
+    release_data_json = Column(EncryptedString, nullable=True)
 
     # Hash for tracking unique downloads (torrent info_hash, NZB hash, or download URL hash)
     info_hash = Column(String(64), nullable=True, index=True)

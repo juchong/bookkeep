@@ -1,6 +1,7 @@
 """Fernet encryption for sensitive values stored in app_settings."""
 import base64
 import os
+from functools import lru_cache
 
 import structlog
 from cryptography.fernet import Fernet, InvalidToken
@@ -24,6 +25,8 @@ CREDENTIAL_COLUMNS = (
     ("download_clients", "password"),
     ("download_clients", "api_key"),
     ("prowlarr_servers", "api_key"),
+    ("download_tasks", "download_url"),
+    ("download_tasks", "release_data_json"),
     ("user_hardcover_sync", "hardcover_api_token"),
     ("direct_download_settings", "zlibrary_password"),
 )
@@ -31,13 +34,8 @@ CREDENTIAL_COLUMNS = (
 _SALT = b"bookkeep-settings-encryption-v1"
 
 
-def _get_fernet() -> Fernet:
-    """Derive a Fernet key from BOOKKEEP_SECRET_KEY via PBKDF2."""
-    secret = os.getenv("BOOKKEEP_SECRET_KEY", "")
-    if not secret:
-        from app.jwt import SECRET_KEY
-        secret = SECRET_KEY
-
+@lru_cache(maxsize=4)
+def _fernet_for_secret(secret: str) -> Fernet:
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
@@ -46,6 +44,15 @@ def _get_fernet() -> Fernet:
     )
     key = base64.urlsafe_b64encode(kdf.derive(secret.encode("utf-8")))
     return Fernet(key)
+
+
+def _get_fernet() -> Fernet:
+    """Derive a Fernet key from BOOKKEEP_SECRET_KEY via PBKDF2."""
+    secret = os.getenv("BOOKKEEP_SECRET_KEY", "")
+    if not secret:
+        from app.jwt import SECRET_KEY
+        secret = SECRET_KEY
+    return _fernet_for_secret(secret)
 
 
 def encrypt_value(plaintext: str) -> str:
