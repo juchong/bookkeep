@@ -18,7 +18,7 @@ import structlog
 from bs4 import BeautifulSoup
 
 from .. import DownloadHandler, DownloadStatus, DownloadState, register_handler
-from ...models import DownloadTask as DownloadTaskModel, AppSettings, DirectDownloadSettings
+from ...models import DownloadTask as DownloadTaskModel, AppSettings, AutoDownloadSettings, DirectDownloadSettings
 from ..outbound import configured_release_hosts, validate_outbound_url
 from sqlalchemy.orm import Session
 
@@ -233,6 +233,15 @@ class DirectHandler(DownloadHandler):
     def _validate_url(self, url: str) -> None:
         allowed_hosts = configured_release_hosts(self.db_session, "direct") if self.db_session else set()
         validate_outbound_url(url, allowed_private_hosts=allowed_hosts)
+
+    def _max_download_bytes(self, task: DownloadTaskModel) -> int:
+        defaults = {"ebook": 500.0, "audiobook": 5000.0}
+        max_mb = defaults.get(task.format, 500.0)
+        if self.db_session:
+            settings = self.db_session.query(AutoDownloadSettings).filter(AutoDownloadSettings.id == 1).first()
+            if settings:
+                max_mb = settings.ebook_max_size_mb if task.format == "ebook" else settings.audiobook_max_size_mb
+        return int(max_mb * 1024 * 1024)
 
     def _extract_filename(self, url: str, response, task: DownloadTaskModel) -> str:
         """Extract filename from response or generate from task info."""
@@ -829,7 +838,14 @@ class DirectHandler(DownloadHandler):
                         return None
 
                 # Get file info
-                total_size = int(response.headers.get("content-length", 0))
+                try:
+                    total_size = int(response.headers.get("content-length", 0))
+                except (TypeError, ValueError):
+                    total_size = 0
+                max_download_bytes = self._max_download_bytes(task)
+                if total_size > max_download_bytes:
+                    attempt.error = "Download exceeds the configured maximum size"
+                    return None
                 filename = self._extract_filename(url, response, task)
                 dest_path = self._get_unique_path(dest_dir / filename)
 
@@ -858,6 +874,10 @@ class DirectHandler(DownloadHandler):
                         f.write(first_chunk)
                         downloaded += len(first_chunk)
                         attempt.bytes_downloaded = downloaded
+                        if downloaded > max_download_bytes:
+                            dest_path.unlink(missing_ok=True)
+                            attempt.error = "Download exceeds the configured maximum size"
+                            return None
 
                     for chunk in response.iter_bytes(self.CHUNK_SIZE):
                         if cancel_flag.is_set():
@@ -870,6 +890,11 @@ class DirectHandler(DownloadHandler):
                         f.write(chunk)
                         downloaded += len(chunk)
                         attempt.bytes_downloaded = downloaded
+                        if downloaded > max_download_bytes:
+                            f.close()
+                            dest_path.unlink(missing_ok=True)
+                            attempt.error = "Download exceeds the configured maximum size"
+                            return None
 
                         # Calculate progress
                         progress = (downloaded / total_size * 100) if total_size > 0 else 0

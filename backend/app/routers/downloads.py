@@ -17,6 +17,7 @@ from app.auth import require_admin, get_current_user
 from app import models
 from ..downloads.prowlarr import ProwlarrSource
 from ..downloads import DownloadOrchestrator
+from ..downloads.orchestrator import DownloadCapacityError, DuplicateDownloadError
 from ..downloads.handlers.direct import get_download_log
 from ..downloads.release_tokens import InvalidReleaseToken, issue_release_token, resolve_release_token
 
@@ -410,6 +411,10 @@ async def start_download(
 
     except HTTPException:
         raise
+    except DownloadCapacityError as e:
+        raise HTTPException(status_code=429, detail=str(e)) from e
+    except DuplicateDownloadError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         logger.error("download_failed", book_id=request.book_id, error=str(e))
         raise HTTPException(
@@ -477,6 +482,10 @@ async def auto_download(
 
     except HTTPException:
         raise
+    except DownloadCapacityError as e:
+        raise HTTPException(status_code=429, detail=str(e)) from e
+    except DuplicateDownloadError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception as e:
         logger.error("auto_download_failed", book_id=book_id, error=str(e))
         raise HTTPException(
@@ -626,13 +635,18 @@ async def retry_download(
         size_bytes=prior.size_bytes or 0,
     )
     orchestrator = DownloadOrchestrator(db_session=db)
-    task = orchestrator.create_download_task(
-        book,
-        release,
-        prior.format,
-        request_id=prior.request_id,
-        user_id=prior.user_id,
-    )
+    try:
+        task = orchestrator.create_download_task(
+            book,
+            release,
+            prior.format,
+            request_id=prior.request_id,
+            user_id=prior.user_id,
+        )
+    except DownloadCapacityError as e:
+        raise HTTPException(status_code=429, detail=str(e)) from e
+    except DuplicateDownloadError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     if not task or not orchestrator.start_download(task.id):
         raise HTTPException(status_code=500, detail="Failed to retry download")
     return DownloadResponse(task_id=task.id, status="downloading", message="Download retry started")

@@ -272,6 +272,15 @@ class DownloadTask(Base):
             postgresql_where=text("request_id IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
             sqlite_where=text("request_id IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
         ),
+        Index(
+            "uq_download_tasks_active_release",
+            "book_id",
+            "format",
+            "info_hash",
+            unique=True,
+            postgresql_where=text("info_hash IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
+            sqlite_where=text("info_hash IS NOT NULL AND state IN ('queued', 'downloading', 'checking', 'processing', 'paused')"),
+        ),
     )
 
     id = Column(Integer, primary_key=True, index=True)

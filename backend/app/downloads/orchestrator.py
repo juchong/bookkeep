@@ -5,6 +5,7 @@ Manages the complete download workflow from search to completion.
 """
 import os
 import re
+import hashlib
 import shutil
 import threading
 import unicodedata
@@ -13,6 +14,8 @@ from typing import Optional, List, Dict
 from threading import Event
 from datetime import datetime, timezone
 import structlog
+from sqlalchemy import func, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import (
@@ -24,11 +27,21 @@ from . import (
     list_sources,
     list_handlers,
 )
-from ..models import Book, BookRequest, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
+from ..models import AutoDownloadSettings, Book, BookRequest, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
 from ..database import SessionLocal
 from .outbound import configured_release_hosts, validate_outbound_url
 
 logger = structlog.get_logger()
+
+ACTIVE_DOWNLOAD_STATES = ("queued", "downloading", "checking", "processing", "paused")
+
+
+class DownloadCapacityError(RuntimeError):
+    pass
+
+
+class DuplicateDownloadError(RuntimeError):
+    pass
 
 
 _MEDIA_EXTENSIONS = {
@@ -121,6 +134,9 @@ class DownloadOrchestrator:
     7. Update book availability
     """
 
+    _active_downloads: Dict[int, Event] = {}
+    _download_threads: Dict[int, threading.Thread] = {}
+
     def __init__(self, db_session: Optional[Session] = None):
         """
         Initialize orchestrator.
@@ -129,8 +145,6 @@ class DownloadOrchestrator:
             db_session: Database session (will create if not provided)
         """
         self.db_session = db_session
-        self._active_downloads: Dict[int, Event] = {}  # task_id -> cancel_event
-        self._download_threads: Dict[int, threading.Thread] = {}
 
     def get_available_protocols(self, db: Optional[Session] = None) -> List[str]:
         """
@@ -278,6 +292,33 @@ class DownloadOrchestrator:
                 release.download_url,
                 allowed_private_hosts=configured_release_hosts(db, release.source),
             )
+            info_hash = hashlib.sha256(release.download_url.encode()).hexdigest()[:16]
+            if db.get_bind().dialect.name == "postgresql":
+                db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 0x424F4F4B})
+
+            settings = db.query(AutoDownloadSettings).filter(AutoDownloadSettings.id == 1).first()
+            max_active = settings.max_active_downloads if settings else 10
+            active_count = db.query(func.count(DownloadTask.id)).filter(
+                DownloadTask.state.in_(ACTIVE_DOWNLOAD_STATES)
+            ).scalar() or 0
+            if active_count >= max_active:
+                raise DownloadCapacityError(f"Active download limit reached ({max_active})")
+
+            duplicate = db.query(DownloadTask.id).filter(
+                DownloadTask.book_id == book.id,
+                DownloadTask.format == format_type,
+                DownloadTask.info_hash == info_hash,
+                DownloadTask.state.in_(ACTIVE_DOWNLOAD_STATES),
+            ).first()
+            if duplicate:
+                raise DuplicateDownloadError("This release is already downloading")
+
+            max_size_mb = None
+            if settings:
+                max_size_mb = settings.ebook_max_size_mb if format_type == "ebook" else settings.audiobook_max_size_mb
+            if max_size_mb and release.size_bytes and release.size_bytes > max_size_mb * 1024 * 1024:
+                raise DownloadCapacityError("Release exceeds the configured maximum size")
+
             # Store release data as JSON
             import json
             from datetime import datetime
@@ -305,10 +346,6 @@ class DownloadOrchestrator:
                 "publish_date": release.publish_date.isoformat() if release.publish_date else None,
                 "metadata": release.metadata,
             }
-
-            # Compute hash from download URL for tracking
-            import hashlib
-            info_hash = hashlib.sha256(release.download_url.encode()).hexdigest()[:16]
 
             task = DownloadTask(
                 book_id=book.id,
@@ -343,6 +380,12 @@ class DownloadOrchestrator:
 
             return task
 
+        except (DownloadCapacityError, DuplicateDownloadError):
+            db.rollback()
+            raise
+        except IntegrityError as e:
+            db.rollback()
+            raise DuplicateDownloadError("This release is already downloading") from e
         except Exception as e:
             logger.error(
                 "orchestrator_create_task_failed",
