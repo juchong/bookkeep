@@ -33,6 +33,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -55,17 +58,25 @@ COPY backend ./backend
 COPY --from=frontend-builder /app/frontend/dist ./frontend_dist
 
 # Create data directory for SQLite
-RUN mkdir -p /app/data
+RUN groupadd --gid 10001 bookkeep \
+    && useradd --uid 10001 --gid bookkeep --create-home --shell /usr/sbin/nologin bookkeep \
+    && mkdir -p /app/data \
+    && chown bookkeep:bookkeep /app/data \
+    && chmod -R a+rX /app/backend /app/frontend_dist
 
 # Copy and make entrypoint script executable
 COPY backend/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+RUN chmod 755 /app/entrypoint.sh
 
 # Set PYTHONPATH to include backend directory so imports work correctly
 ENV PYTHONPATH="/app/backend"
 
 # Expose port
 EXPOSE 8000
+
+# The application only needs write access to /app/data (SQLite deployments),
+# /tmp, and explicitly mounted download directories.
+USER bookkeep:bookkeep
 
 # Use entrypoint script to run migrations then start the app
 ENTRYPOINT ["/app/entrypoint.sh"]
