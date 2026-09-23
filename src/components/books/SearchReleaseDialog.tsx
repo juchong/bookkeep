@@ -183,16 +183,16 @@ export function SearchReleaseDialog({
       const newMap = new Map(prev);
       downloadTasks.forEach((task) => {
         // Use loose equality to handle number vs string
-        if (task.book_id == bookId && task.download_url) {
+        if (task.book_id == bookId && task.release_key) {
           // Set state based on task state
           if (['complete', 'seeding'].includes(task.state) && task.import_status === 'imported') {
-            newMap.set(task.download_url, 'complete');
+            newMap.set(task.release_key, 'complete');
           } else if (task.state === 'error' || task.import_status === 'failed') {
-            newMap.set(task.download_url, 'failed');
+            newMap.set(task.release_key, 'failed');
           } else if (['complete', 'seeding'].includes(task.state)) {
-            newMap.set(task.download_url, 'awaiting_import');
+            newMap.set(task.release_key, 'awaiting_import');
           } else if (['queued', 'downloading', 'checking'].includes(task.state)) {
-            newMap.set(task.download_url, 'downloading');
+            newMap.set(task.release_key, 'downloading');
           }
         }
       });
@@ -210,25 +210,21 @@ export function SearchReleaseDialog({
       // Set state to pending to show spinner
       setDownloadStates((prev) => {
         const newMap = new Map(prev);
-        newMap.set(params.release.download_url, 'pending');
+        newMap.set(params.release.release_key, 'pending');
         return newMap;
       });
 
       return downloadsApi.downloadRelease({
         book_id: bookId,
         format_type: params.formatType,
-        download_url: params.release.download_url,
-        protocol: params.release.protocol,
-        release_title: params.release.title,
-        indexer: params.release.indexer,
-        size_bytes: params.release.size_bytes,
+        release_token: params.release.release_token,
       });
     },
     onSuccess: (data, params) => {
       // Set state to downloading once task is created
       setDownloadStates((prev) => {
         const newMap = new Map(prev);
-        newMap.set(params.release.download_url, 'downloading');
+        newMap.set(params.release.release_key, 'downloading');
         return newMap;
       });
 
@@ -248,7 +244,7 @@ export function SearchReleaseDialog({
       // Clear download state on error
       setDownloadStates((prev) => {
         const newMap = new Map(prev);
-        newMap.delete(params.release.download_url);
+        newMap.delete(params.release.release_key);
         return newMap;
       });
 
@@ -277,8 +273,8 @@ export function SearchReleaseDialog({
       setDownloadStates((prev) => {
         const newMap = new Map(prev);
         completedTasks.forEach((task) => {
-          if (task.download_url) {
-            newMap.set(task.download_url, 'complete');
+          if (task.release_key) {
+            newMap.set(task.release_key, 'complete');
           }
         });
         return newMap;
@@ -399,11 +395,11 @@ export function SearchReleaseDialog({
           // Find the task in the tasks list - use loose equality for book_id
           const task = downloadTasks.find((downloadTask) =>
             downloadTask.book_id == bookId &&
-            downloadTask.download_url === release.download_url
+            downloadTask.release_key === release.release_key
           );
 
           // Get download state from our state map
-          const downloadState = downloadStates.get(release.download_url);
+          const downloadState = downloadStates.get(release.release_key);
 
           // Determine current state
           const isPending = downloadState === 'pending';
@@ -419,7 +415,7 @@ export function SearchReleaseDialog({
 
           return (
             <div
-              key={`${release.indexer}-${release.download_url}-${index}`}
+              key={`${release.indexer}-${release.release_key}-${index}`}
               className="border border-border rounded-lg p-4 hover:border-primary/50 transition-colors space-y-3"
             >
               <div className="space-y-2">

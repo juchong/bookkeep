@@ -1163,7 +1163,8 @@ export const downloadSettingsApi = {
 // Downloads API endpoints
 export interface ReleaseInfo {
   title: string;
-  download_url: string;
+  release_token: string;
+  release_key: string;
   protocol: string;
   indexer: string;
   size_bytes: number;
@@ -1194,7 +1195,7 @@ export interface DownloadTask {
   format: string;
   source: string;
   release_title: string;
-  download_url: string;
+  release_key: string;
   protocol: string;
   state: string;
   progress: number;
@@ -1266,11 +1267,7 @@ export const downloadsApi = {
   downloadRelease: (request: {
     book_id: number;
     format_type: string;
-    download_url: string;
-    protocol: string;
-    release_title: string;
-    indexer?: string;
-    size_bytes?: number;
+    release_token: string;
   }) =>
     apiRequest<DownloadResponse>('/api/downloads/download', {
       method: 'POST',
@@ -1301,6 +1298,11 @@ export const downloadsApi = {
   // Get download log for a specific task
   getTaskLog: (taskId: number) =>
     apiRequest<DownloadLog>(`/api/downloads/tasks/${taskId}/log`),
+
+  retryTask: (taskId: number) =>
+    apiRequest<DownloadResponse>(`/api/downloads/task/${taskId}/retry`, {
+      method: 'POST',
+    }),
 
   // Manually import a download to the configured destination
   importDownload: (taskId: number) =>

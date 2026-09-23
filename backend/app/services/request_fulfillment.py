@@ -491,6 +491,7 @@ def _process_one_request(request_id: int, dry_run: bool) -> dict[str, Any]:
             selected.release,
             request.format,
             request_id=request.id,
+            user_id=request.user_id,
         )
         if not task:
             active = _active_task(db, request)

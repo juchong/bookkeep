@@ -18,6 +18,7 @@ from app import models
 from ..downloads.prowlarr import ProwlarrSource
 from ..downloads import DownloadOrchestrator
 from ..downloads.handlers.direct import get_download_log
+from ..downloads.release_tokens import InvalidReleaseToken, issue_release_token, resolve_release_token
 
 router = APIRouter()
 logger = structlog.get_logger()
@@ -91,7 +92,8 @@ def get_download_path(db: Session, format_type: str) -> Optional[str]:
 class ReleaseInfo(BaseModel):
     """Information about a search result release"""
     title: str
-    download_url: str
+    release_token: str
+    release_key: str
     protocol: str  # "torrent", "usenet", or "direct"
     indexer: str
     size_bytes: int
@@ -115,12 +117,7 @@ class DownloadRequest(BaseModel):
     """Request to download a specific release"""
     book_id: int
     format_type: str  # "ebook" or "audiobook"
-    download_url: str
-    protocol: str  # "torrent", "usenet", or "direct"
-    release_title: str
-    # Defaults keep the API aligned with clients that lack release metadata.
-    indexer: str = ""
-    size_bytes: int = 0
+    release_token: str
 
 
 class DownloadResponse(BaseModel):
@@ -269,7 +266,13 @@ async def search_releases(
 
         release_info.append(ReleaseInfo(
             title=r.title,
-            download_url=r.download_url,
+            release_token=issue_release_token(
+                release=r,
+                user_id=current_user.id,
+                book_id=book_id,
+                format_type=format_type,
+            ),
+            release_key=release_hash,
             protocol=r.protocol,
             indexer=r.indexer,
             size_bytes=r.size_bytes,
@@ -322,6 +325,16 @@ async def start_download(
         raise HTTPException(status_code=404, detail="Book not found")
 
     try:
+        try:
+            selected = resolve_release_token(
+                request.release_token,
+                user_id=current_user.id,
+                book_id=request.book_id,
+                format_type=request.format_type,
+            )
+        except InvalidReleaseToken as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         # Initialize orchestrator
         orchestrator = DownloadOrchestrator(db_session=db)
 
@@ -329,11 +342,11 @@ async def start_download(
         from ..downloads import Release
         release = Release(
             source="manual",
-            title=request.release_title,
-            download_url=request.download_url,
-            protocol=request.protocol,
-            indexer=request.indexer,
-            size_bytes=request.size_bytes,
+            title=selected["title"],
+            download_url=selected["download_url"],
+            protocol=selected["protocol"],
+            indexer=selected.get("indexer") or "",
+            size_bytes=selected.get("size_bytes") or 0,
             seeders=None,
             format=None,
             language=None,
@@ -345,7 +358,8 @@ async def start_download(
         task = orchestrator.create_download_task(
             book=book,
             release=release,
-            format_type=request.format_type
+            format_type=request.format_type,
+            user_id=current_user.id,
         )
 
         if not task:
@@ -419,7 +433,8 @@ async def auto_download(
         task = orchestrator.search_and_download(
             book=book,
             format_type=format_type,
-            source_name="prowlarr"
+            source_name="prowlarr",
+            user_id=current_user.id,
         )
 
         if not task:
@@ -469,6 +484,9 @@ async def get_download_tasks(
     """
     query = db.query(DownloadTask).order_by(DownloadTask.created_at.desc())
 
+    if not current_user.is_admin:
+        query = query.filter(DownloadTask.user_id == current_user.id)
+
     if state:
         query = query.filter(DownloadTask.state == state)
 
@@ -483,11 +501,11 @@ async def get_download_tasks(
             "format": task.format,
             "source": task.source,
             "release_title": task.release_title,
-            "download_url": task.download_url,
+            "release_key": task.info_hash,
             "protocol": task.protocol,
             "state": task.state,
             "progress": task.progress,
-            "download_path": task.download_path,
+            "download_path": task.download_path if current_user.is_admin else None,
             "message": task.message,
             "client_state": task.client_state,
             "import_status": task.import_status,
@@ -530,7 +548,10 @@ async def get_download_task_log(
     which sources were tried.
     """
     # Verify task exists
-    task = db.query(DownloadTask).filter(DownloadTask.id == task_id).first()
+    task_query = db.query(DownloadTask).filter(DownloadTask.id == task_id)
+    if not current_user.is_admin:
+        task_query = task_query.filter(DownloadTask.user_id == current_user.id)
+    task = task_query.first()
     if not task:
         raise HTTPException(status_code=404, detail="Download task not found")
 
@@ -548,7 +569,52 @@ async def get_download_task_log(
             "message": "No detailed log available for this task"
         }
 
-    return download_log.to_dict()
+    result = download_log.to_dict()
+    for attempt in result.get("attempts", []):
+        attempt.pop("url", None)
+    return result
+
+
+@router.post("/task/{task_id}/retry", response_model=DownloadResponse)
+async def retry_download(
+    task_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Retry an owned failed task without returning its credential-bearing URL."""
+    task_query = db.query(DownloadTask).filter(DownloadTask.id == task_id)
+    if not current_user.is_admin:
+        task_query = task_query.filter(DownloadTask.user_id == current_user.id)
+    prior = task_query.first()
+    if not prior:
+        raise HTTPException(status_code=404, detail="Download task not found")
+    if prior.state != "error":
+        raise HTTPException(status_code=400, detail="Only failed downloads can be retried")
+
+    book = db.query(Book).filter(Book.id == prior.book_id).first()
+    if not book or not prior.download_url or prior.protocol not in {"torrent", "usenet", "direct"}:
+        raise HTTPException(status_code=400, detail="Download task cannot be retried")
+
+    from ..downloads import Release
+    release = Release(
+        source=prior.source,
+        title=prior.release_title or book.title,
+        download_url=prior.download_url,
+        protocol=prior.protocol,
+        indexer=prior.indexer,
+        size_bytes=prior.size_bytes or 0,
+    )
+    orchestrator = DownloadOrchestrator(db_session=db)
+    task = orchestrator.create_download_task(
+        book,
+        release,
+        prior.format,
+        request_id=prior.request_id,
+        user_id=prior.user_id,
+    )
+    if not task or not orchestrator.start_download(task.id):
+        raise HTTPException(status_code=500, detail="Failed to retry download")
+    return DownloadResponse(task_id=task.id, status="downloading", message="Download retry started")
 
 
 @router.post("/import/{task_id}")
@@ -567,7 +633,10 @@ async def import_download(
         task_id: ID of the download task to import
     """
     # Get the task
-    task = db.query(DownloadTask).filter(DownloadTask.id == task_id).first()
+    task_query = db.query(DownloadTask).filter(DownloadTask.id == task_id)
+    if not current_user.is_admin:
+        task_query = task_query.filter(DownloadTask.user_id == current_user.id)
+    task = task_query.first()
     if not task:
         raise HTTPException(status_code=404, detail="Download task not found")
 
@@ -662,7 +731,10 @@ async def delete_task(
         task_id: ID of the download task to delete
     """
     # Get the task
-    task = db.query(DownloadTask).filter(DownloadTask.id == task_id).first()
+    task_query = db.query(DownloadTask).filter(DownloadTask.id == task_id)
+    if not current_user.is_admin:
+        task_query = task_query.filter(DownloadTask.user_id == current_user.id)
+    task = task_query.first()
     if not task:
         raise HTTPException(status_code=404, detail="Download task not found")
 
@@ -708,7 +780,10 @@ async def clear_tasks(
     tasks_to_delete = []
 
     # Get all tasks
-    all_tasks = db.query(DownloadTask).all()
+    task_query = db.query(DownloadTask)
+    if not current_user.is_admin:
+        task_query = task_query.filter(DownloadTask.user_id == current_user.id)
+    all_tasks = task_query.all()
 
     for task in all_tasks:
         # Skip active tasks

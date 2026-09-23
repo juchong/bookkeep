@@ -24,6 +24,7 @@ class User(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     requests = relationship("BookRequest", back_populates="user")
+    download_tasks = relationship("DownloadTask", back_populates="user")
 
 class Book(Base):
     __tablename__ = "books"
@@ -276,6 +277,7 @@ class DownloadTask(Base):
     id = Column(Integer, primary_key=True, index=True)
     book_id = Column(Integer, ForeignKey("books.id"), nullable=False, index=True)
     request_id = Column(Integer, ForeignKey("book_requests.id", ondelete="SET NULL"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     format = Column(String, nullable=False)  # "ebook" or "audiobook"
 
     # Release information
@@ -326,6 +328,7 @@ class DownloadTask(Base):
 
     # Relationships
     book = relationship("Book", back_populates="download_tasks")
+    user = relationship("User", back_populates="download_tasks")
 
 
 class AutoDownloadSettings(Base):

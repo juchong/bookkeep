@@ -43,7 +43,7 @@ interface DownloadTask {
   release_title: string;
   message?: string;
   client_state?: string;
-  download_url: string;
+  release_key: string;
   protocol: string;
   state: string;
   progress: number;
@@ -264,19 +264,8 @@ export default function Downloads() {
     },
   });
 
-  // Retry a failed download mutation
   const retryMutation = useMutation({
-    mutationFn: async (task: DownloadTask) => {
-      return downloadsApi.downloadRelease({
-        book_id: task.book_id,
-        format_type: task.format,
-        download_url: task.download_url,
-        protocol: task.protocol,
-        release_title: task.release_title,
-        indexer: task.source || undefined,
-        size_bytes: 0,
-      });
-    },
+    mutationFn: (task: DownloadTask) => downloadsApi.retryTask(task.id),
     onSuccess: (data) => {
       toast.success('Download retrying', { description: data.message });
       queryClient.invalidateQueries({ queryKey: ['download-tasks'] });

@@ -257,6 +257,7 @@ class DownloadOrchestrator:
         release: Release,
         format_type: str,
         request_id: Optional[int] = None,
+        user_id: Optional[int] = None,
     ) -> Optional[DownloadTask]:
         """
         Create a download task from a release.
@@ -307,6 +308,7 @@ class DownloadOrchestrator:
             task = DownloadTask(
                 book_id=book.id,
                 request_id=request_id,
+                user_id=user_id,
                 format=format_type,
                 source=release.source,
                 release_title=release.title,
@@ -945,7 +947,8 @@ class DownloadOrchestrator:
         self,
         book: Book,
         format_type: str = "ebook",
-        source_name: str = "prowlarr"
+        source_name: str = "prowlarr",
+        user_id: Optional[int] = None,
     ) -> Optional[DownloadTask]:
         """
         Complete workflow: search, select best release, and start download.
@@ -981,7 +984,7 @@ class DownloadOrchestrator:
         )
 
         # Create download task
-        task = self.create_download_task(book, best_release, format_type)
+        task = self.create_download_task(book, best_release, format_type, user_id=user_id)
 
         if not task:
             return None
