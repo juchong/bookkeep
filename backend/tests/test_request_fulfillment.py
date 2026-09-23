@@ -298,6 +298,7 @@ def test_live_run_links_one_task_and_marks_request_processing(monkeypatch):
     db.close()
 
     monkeypatch.setattr(fulfillment, "SessionLocal", factory)
+    monkeypatch.setattr("app.downloads.orchestrator.validate_outbound_url", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         fulfillment.DownloadOrchestrator,
         "search_releases",

@@ -24,6 +24,23 @@ router = APIRouter()
 logger = structlog.get_logger()
 
 
+def require_download_authorization(db: Session, current_user: models.User, book_id: int, format_type: str):
+    if format_type not in {"ebook", "audiobook"}:
+        raise HTTPException(status_code=400, detail="Unsupported download format")
+    if not current_user.can_download:
+        raise HTTPException(status_code=403, detail="Download permission required")
+    if current_user.is_admin:
+        return
+    approved = db.query(models.BookRequest.id).filter(
+        models.BookRequest.user_id == current_user.id,
+        models.BookRequest.book_id == book_id,
+        models.BookRequest.format == format_type,
+        models.BookRequest.status.in_(["approved", "processing"]),
+    ).first()
+    if not approved:
+        raise HTTPException(status_code=403, detail="An approved request is required")
+
+
 def compute_release_hash(download_url: str) -> str:
     """Compute a hash for a release based on download URL."""
     return hashlib.sha256(download_url.encode()).hexdigest()[:16]
@@ -312,6 +329,7 @@ async def start_download(
     Creates a download task and sends it to the appropriate download client.
     """
     # Check if download path is configured
+    require_download_authorization(db, current_user, request.book_id, request.format_type)
     download_path = get_download_path(db, request.format_type)
     if not download_path:
         raise HTTPException(
@@ -341,7 +359,7 @@ async def start_download(
         # Create a Release object from the request
         from ..downloads import Release
         release = Release(
-            source="manual",
+            source=selected["source"],
             title=selected["title"],
             download_url=selected["download_url"],
             protocol=selected["protocol"],
@@ -413,6 +431,7 @@ async def auto_download(
     Uses quality scoring to select the best release automatically.
     """
     # Check if download path is configured
+    require_download_authorization(db, current_user, book_id, format_type)
     download_path = get_download_path(db, format_type)
     if not download_path:
         raise HTTPException(
@@ -590,6 +609,8 @@ async def retry_download(
         raise HTTPException(status_code=404, detail="Download task not found")
     if prior.state != "error":
         raise HTTPException(status_code=400, detail="Only failed downloads can be retried")
+
+    require_download_authorization(db, current_user, prior.book_id, prior.format)
 
     book = db.query(Book).filter(Book.id == prior.book_id).first()
     if not book or not prior.download_url or prior.protocol not in {"torrent", "usenet", "direct"}:

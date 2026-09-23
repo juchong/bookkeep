@@ -19,6 +19,7 @@ from bs4 import BeautifulSoup
 
 from .. import DownloadHandler, DownloadStatus, DownloadState, register_handler
 from ...models import DownloadTask as DownloadTaskModel, AppSettings, DirectDownloadSettings
+from ..outbound import configured_release_hosts, validate_outbound_url
 from sqlalchemy.orm import Session
 
 from ..flaresolverr import (
@@ -229,6 +230,10 @@ class DirectHandler(DownloadHandler):
             }
         )
 
+    def _validate_url(self, url: str) -> None:
+        allowed_hosts = configured_release_hosts(self.db_session, "direct") if self.db_session else set()
+        validate_outbound_url(url, allowed_private_hosts=allowed_hosts)
+
     def _extract_filename(self, url: str, response, task: DownloadTaskModel) -> str:
         """Extract filename from response or generate from task info."""
         # Try Content-Disposition header first
@@ -321,6 +326,7 @@ class DirectHandler(DownloadHandler):
         sources: List[DownloadSource] = []
 
         try:
+            self._validate_url(url)
             logger.info("annas_parsing_md5_page", url=url)
 
             html = None
@@ -648,6 +654,7 @@ class DirectHandler(DownloadHandler):
         url = source.url
 
         try:
+            self._validate_url(url)
             # Resolve intermediary pages
             if source.source_type in ("aa-slow-nowait", "aa-slow-wait"):
                 resolved = self._resolve_slow_download(url, client, status_callback)
@@ -655,6 +662,7 @@ class DirectHandler(DownloadHandler):
                     attempt.error = "Could not resolve slow download CDN link"
                     return None
                 url = resolved
+                self._validate_url(url)
                 logger.info("direct_slow_download_resolved", source=source.name, cdn_url=url[:80])
 
             elif source.source_type == "libgen":
@@ -664,6 +672,7 @@ class DirectHandler(DownloadHandler):
                         attempt.error = "Could not resolve Libgen download link"
                         return None
                     url = resolved
+                    self._validate_url(url)
 
             # Update status - use short source type label for UI
             source_labels = {

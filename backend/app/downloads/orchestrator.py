@@ -26,6 +26,7 @@ from . import (
 )
 from ..models import Book, BookRequest, DownloadTask, AppSettings, DownloadClient, DirectDownloadSettings
 from ..database import SessionLocal
+from .outbound import configured_release_hosts, validate_outbound_url
 
 logger = structlog.get_logger()
 
@@ -273,6 +274,10 @@ class DownloadOrchestrator:
         db = self.db_session or SessionLocal()
 
         try:
+            validate_outbound_url(
+                release.download_url,
+                allowed_private_hosts=configured_release_hosts(db, release.source),
+            )
             # Store release data as JSON
             import json
             from datetime import datetime

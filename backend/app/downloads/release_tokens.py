@@ -36,6 +36,7 @@ def issue_release_token(*, release: Any, user_id: int, book_id: int, format_type
         "user_id": user_id,
         "book_id": book_id,
         "format_type": format_type,
+        "source": release.source,
         "title": release.title,
         "download_url": release.download_url,
         "protocol": release.protocol,
@@ -64,6 +65,8 @@ def resolve_release_token(
         or payload.get("format_type") != format_type
     ):
         raise InvalidReleaseToken("Release selection does not match this request")
+    if payload.get("source") not in {"prowlarr", "direct"}:
+        raise InvalidReleaseToken("Release selection has an invalid source")
     if payload.get("protocol") not in {"torrent", "usenet", "direct"} or not payload.get("download_url"):
         raise InvalidReleaseToken("Release selection is incomplete")
     return payload
