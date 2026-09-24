@@ -1,20 +1,22 @@
 import { NavLink, useLocation, Link } from 'react-router-dom';
-import { Compass, Clock, Settings, Users, Shield, BookOpen, Download, Sparkles } from 'lucide-react';
+import { AlertTriangle, Compass, Clock, Settings, Users, Shield, BookOpen, Download, Flag, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useUser } from '@/contexts/UserContext';
 import { useQuery } from '@tanstack/react-query';
-import { requestsApi } from '@/lib/api';
+import { adminMediaIssuesApi, requestsApi } from '@/lib/api';
 import { usePageVisibility } from '@/hooks/usePageVisibility';
 
 const navItems = [
   { to: '/', icon: Compass, label: 'Discover' },
   { to: '/requests', icon: Clock, label: 'Requests' },
+  { to: '/issues', icon: Flag, label: 'Reported Issues' },
   { to: '/downloads', icon: Download, label: 'Downloads' },
   { to: '/series', icon: BookOpen, label: 'Series' },
 ];
 
 const adminItems = [
   { to: '/admin', icon: Shield, label: 'Admin' },
+  { to: '/admin/issues', icon: AlertTriangle, label: 'Media Issues' },
   { to: '/admin/users', icon: Users, label: 'Users' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
@@ -36,6 +38,12 @@ export function Sidebar({ variant = 'desktop', className }: SidebarProps) {
     refetchInterval: isVisible ? 60_000 : false,
   });
   const pendingCount = pendingRequests?.length ?? 0;
+  const { data: issueStats } = useQuery({
+    queryKey: ['admin-media-issues', 'stats'],
+    queryFn: adminMediaIssuesApi.getStats,
+    enabled: isAdmin,
+    refetchInterval: isVisible ? 60_000 : false,
+  });
 
   const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
   const isMobile = variant === 'mobile';
@@ -70,7 +78,7 @@ export function Sidebar({ variant = 'desktop', className }: SidebarProps) {
       <nav className="flex-1 px-3 py-2">
         <div className="space-y-1">
           {navItems.map((item, index) => {
-            const isActive = location.pathname === item.to;
+            const isActive = location.pathname === item.to || location.pathname.startsWith(`${item.to}/`);
             return (
               <NavLink
                 key={item.to}
@@ -146,6 +154,14 @@ export function Sidebar({ variant = 'desktop', className }: SidebarProps) {
                     {item.to === '/admin' && pendingCount > 0 ? (
                       <span className="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-warning px-1.5 text-[10px] font-bold text-warning-foreground">
                         {pendingCount}
+                      </span>
+                    ) : item.to === '/admin/issues' && (issueStats?.open || 0) > 0 ? (
+                      <span className={`ml-auto flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] font-bold ${
+                        (issueStats?.critical || 0) > 0
+                          ? 'bg-destructive text-destructive-foreground'
+                          : 'bg-primary text-primary-foreground'
+                      }`}>
+                        {issueStats?.open}
                       </span>
                     ) : isActive ? (
                       <div className="ml-auto h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, BigInteger, Index, text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, Float, BigInteger, Index, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -26,6 +26,7 @@ class User(Base):
     
     requests = relationship("BookRequest", back_populates="user")
     download_tasks = relationship("DownloadTask", back_populates="user")
+    media_issue_reports = relationship("MediaIssueReport", back_populates="reporter")
 
 class Book(Base):
     __tablename__ = "books"
@@ -436,3 +437,115 @@ class DirectDownloadSettings(Base):
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class MediaIssue(Base):
+    """A canonical, actionable problem with an ebook or audiobook."""
+    __tablename__ = "media_issues"
+
+    id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(36), unique=True, nullable=False, index=True)
+    book_id = Column(Integer, ForeignKey("books.id", ondelete="SET NULL"), nullable=True, index=True)
+    format = Column(String(16), nullable=True, index=True)
+    download_task_id = Column(
+        Integer,
+        ForeignKey("download_tasks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    media_key = Column(String(255), nullable=False)
+    issue_type = Column(String(32), nullable=False, index=True)
+    status = Column(String(16), default="open", nullable=False, index=True)
+    fingerprint = Column(String(64), nullable=False, index=True)
+    # Equal to fingerprint while open and cleared when done. A nullable unique
+    # key gives us race-safe duplicate prevention on PostgreSQL and SQLite.
+    active_key = Column(String(64), unique=True, nullable=True, index=True)
+    report_count = Column(Integer, default=1, nullable=False)
+    is_critical = Column(Boolean, default=False, nullable=False, index=True)
+    critical_report_count = Column(Integer, default=0, nullable=False)
+    critical_first_reported_at = Column(DateTime(timezone=True), nullable=True)
+    first_reported_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_reported_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    done_at = Column(DateTime(timezone=True), nullable=True)
+    done_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    done_note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    book = relationship("Book")
+    download_task = relationship("DownloadTask", foreign_keys=[download_task_id])
+    done_by = relationship("User", foreign_keys=[done_by_user_id])
+    reports = relationship("MediaIssueReport", back_populates="issue", cascade="all, delete-orphan")
+    events = relationship("MediaIssueStatusEvent", back_populates="issue", cascade="all, delete-orphan")
+    notifications = relationship("IssueNotification", back_populates="issue", cascade="all, delete-orphan")
+
+
+class MediaIssueReport(Base):
+    """One user's private report attached to a canonical media issue."""
+    __tablename__ = "media_issue_reports"
+    __table_args__ = (
+        UniqueConstraint("issue_id", "reporter_user_id", name="uq_media_issue_reporter"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    issue_id = Column(Integer, ForeignKey("media_issues.id", ondelete="CASCADE"), nullable=False, index=True)
+    reporter_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    reporter_name_snapshot = Column(String(255), nullable=False)
+    report_text = Column(Text, nullable=False)
+    request_id = Column(Integer, ForeignKey("book_requests.id", ondelete="SET NULL"), nullable=True)
+    download_task_id = Column(Integer, ForeignKey("download_tasks.id", ondelete="SET NULL"), nullable=True)
+    context_json = Column(Text, nullable=True)
+    is_critical = Column(Boolean, default=False, nullable=False)
+    critical_explanation = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    issue = relationship("MediaIssue", back_populates="reports")
+    reporter = relationship("User", back_populates="media_issue_reports")
+
+
+class MediaIssueStatusEvent(Base):
+    """Small audit trail for report creation and Open/Done transitions."""
+    __tablename__ = "media_issue_status_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    issue_id = Column(Integer, ForeignKey("media_issues.id", ondelete="CASCADE"), nullable=False, index=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    event_type = Column(String(32), nullable=False)
+    previous_status = Column(String(16), nullable=True)
+    new_status = Column(String(16), nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    issue = relationship("MediaIssue", back_populates="events")
+    actor = relationship("User")
+
+
+class IssueNotification(Base):
+    """In-app notification generated by a media issue status change."""
+    __tablename__ = "issue_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "recipient_user_id",
+            "status_event_id",
+            "kind",
+            name="uq_issue_notification_event_recipient",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    recipient_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    issue_id = Column(Integer, ForeignKey("media_issues.id", ondelete="CASCADE"), nullable=False, index=True)
+    status_event_id = Column(
+        Integer,
+        ForeignKey("media_issue_status_events.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind = Column(String(32), nullable=False)
+    message = Column(String(500), nullable=False)
+    read_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    recipient = relationship("User")
+    issue = relationship("MediaIssue", back_populates="notifications")
+    status_event = relationship("MediaIssueStatusEvent")

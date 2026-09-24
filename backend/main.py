@@ -9,7 +9,7 @@ import sys
 import os
 
 from app.database import engine, Base
-from app.routers import users, books, hardcover, requests, settings, readarr, jobs, booklore, audiobookshelf, auth, download_settings, downloads, direct_downloads, oidc, hardcover_sync
+from app.routers import users, books, hardcover, requests, settings, readarr, jobs, booklore, audiobookshelf, auth, download_settings, downloads, direct_downloads, oidc, hardcover_sync, media_issues, admin_media_issues, notifications
 from app import cache
 from app.static_files import resolve_static_file
 
@@ -123,6 +123,9 @@ app.include_router(direct_downloads.router, prefix="/api/direct-downloads", tags
 app.include_router(auth.router)  # No prefix, it's already in the router
 app.include_router(oidc.router)  # No prefix, it's already in the router
 app.include_router(hardcover_sync.router, prefix="/api/hardcover-sync", tags=["hardcover-sync"])
+app.include_router(media_issues.router, prefix="/api/media-issues", tags=["media-issues"])
+app.include_router(admin_media_issues.router, prefix="/api/admin/media-issues", tags=["admin-media-issues"])
+app.include_router(notifications.router, prefix="/api/notifications", tags=["notifications"])
 
 enable_debug_routes = os.getenv("bookkeep_DEBUG_ROUTES", "").lower() in {"1", "true", "yes"}
 if enable_debug_routes:

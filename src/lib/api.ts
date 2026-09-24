@@ -1,4 +1,5 @@
 import type { HardcoverBook } from '@/lib/hardcover';
+import type { AdminMediaIssue, IssueNotification, MediaFormat, MediaIssue, MediaIssueType } from '@/types/issue';
 
 // Use relative paths when served from same origin
 const API_BASE_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:8000');
@@ -1427,4 +1428,124 @@ export const hardcoverSyncApi = {
     apiRequest<{ message: string }>('/api/hardcover-sync/run', {
       method: 'POST',
     }),
+};
+
+export interface MediaIssueCreateInput {
+  book_id?: number;
+  format?: MediaFormat;
+  issue_type: MediaIssueType;
+  report_text: string;
+  request_id?: number;
+  download_task_id?: number;
+  page_path?: string;
+  is_critical: boolean;
+  critical_explanation?: string;
+}
+
+export const mediaIssuesApi = {
+  create: (input: MediaIssueCreateInput) =>
+    apiRequest<{
+      issue: MediaIssue;
+      created: boolean;
+      deduplicated: boolean;
+      already_reported: boolean;
+    }>('/api/media-issues/', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+
+  getPage: (status?: 'open' | 'done', skip = 0, limit = 50) => {
+    const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
+    if (status) params.set('status', status);
+    return apiRequest<{ items: MediaIssue[]; total: number; skip: number; limit: number }>(
+      `/api/media-issues/?${params}`
+    );
+  },
+
+  getById: (publicId: string) =>
+    apiRequest<MediaIssue>(`/api/media-issues/${encodeURIComponent(publicId)}`),
+
+  updateReport: (
+    publicId: string,
+    input: { report_text: string; is_critical: boolean; critical_explanation?: string }
+  ) =>
+    apiRequest<MediaIssue>(`/api/media-issues/${encodeURIComponent(publicId)}/report`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+
+  stillBroken: (publicId: string, explanation: string) =>
+    apiRequest<MediaIssue>(`/api/media-issues/${encodeURIComponent(publicId)}/still-broken`, {
+      method: 'POST',
+      body: JSON.stringify({ explanation }),
+    }),
+};
+
+export const adminMediaIssuesApi = {
+  getPage: (options: {
+    status?: 'open' | 'done' | 'all';
+    format?: MediaFormat;
+    issueType?: MediaIssueType;
+    search?: string;
+    skip?: number;
+    limit?: number;
+  } = {}) => {
+    const params = new URLSearchParams({
+      status: options.status || 'open',
+      skip: String(options.skip || 0),
+      limit: String(options.limit || 50),
+    });
+    if (options.format) params.set('format', options.format);
+    if (options.issueType) params.set('issue_type', options.issueType);
+    if (options.search) params.set('search', options.search);
+    return apiRequest<{ items: AdminMediaIssue[]; total: number; skip: number; limit: number }>(
+      `/api/admin/media-issues/?${params}`
+    );
+  },
+
+  getStats: () =>
+    apiRequest<{ open: number; critical: number; done: number }>('/api/admin/media-issues/stats'),
+
+  getById: (publicId: string) =>
+    apiRequest<AdminMediaIssue>(`/api/admin/media-issues/${encodeURIComponent(publicId)}`),
+
+  markDone: (publicId: string, note?: string) =>
+    apiRequest<AdminMediaIssue>(`/api/admin/media-issues/${encodeURIComponent(publicId)}/done`, {
+      method: 'POST',
+      body: JSON.stringify({ note: note || null }),
+    }),
+
+  reopen: (publicId: string) =>
+    apiRequest<AdminMediaIssue>(`/api/admin/media-issues/${encodeURIComponent(publicId)}/reopen`, {
+      method: 'POST',
+    }),
+
+  update: (publicId: string, input: { issue_type?: MediaIssueType; is_critical?: boolean }) =>
+    apiRequest<AdminMediaIssue>(`/api/admin/media-issues/${encodeURIComponent(publicId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(input),
+    }),
+
+  deleteSpam: (publicId: string) =>
+    apiRequest<void>(`/api/admin/media-issues/${encodeURIComponent(publicId)}/spam`, {
+      method: 'DELETE',
+    }),
+};
+
+export const notificationsApi = {
+  getPage: (skip = 0, limit = 50, unreadOnly = false) => {
+    const params = new URLSearchParams({
+      skip: String(skip),
+      limit: String(limit),
+      unread_only: String(unreadOnly),
+    });
+    return apiRequest<{ items: IssueNotification[]; total: number; skip: number; limit: number }>(
+      `/api/notifications/?${params}`
+    );
+  },
+  getUnreadCount: () => apiRequest<{ count: number }>('/api/notifications/unread-count'),
+  markRead: (id: number) =>
+    apiRequest<{ read_at: string }>(`/api/notifications/${id}/read`, { method: 'POST' }),
+  markAllRead: () =>
+    apiRequest<{ updated: number }>('/api/notifications/read-all', { method: 'POST' }),
 };

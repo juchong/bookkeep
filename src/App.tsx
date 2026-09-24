@@ -20,8 +20,12 @@ const Discover = lazy(() => import("@/pages/Discover"));
 const Browse = lazy(() => import("@/pages/Browse"));
 const BookDetails = lazy(() => import("@/pages/BookDetails"));
 const Requests = lazy(() => import("@/pages/Requests"));
+const Issues = lazy(() => import("@/pages/Issues"));
+const IssueDetail = lazy(() => import("@/pages/IssueDetail"));
+const Inbox = lazy(() => import("@/pages/Inbox"));
 const Downloads = lazy(() => import("@/pages/Downloads"));
 const Admin = lazy(() => import("@/pages/Admin"));
+const AdminIssues = lazy(() => import("@/pages/AdminIssues"));
 const Users = lazy(() => import("@/pages/Users"));
 const Settings = lazy(() => import("@/pages/Settings"));
 const Profile = lazy(() => import("@/pages/Profile"));
@@ -71,6 +75,9 @@ const App = () => (
                     <Route path="/book/:id" element={<BookDetails />} />
                     <Route path="/search" element={<SearchResults />} />
                     <Route path="/requests" element={<Requests />} />
+                    <Route path="/issues" element={<Issues />} />
+                    <Route path="/issues/:publicId" element={<IssueDetail />} />
+                    <Route path="/inbox" element={<Inbox />} />
                     <Route path="/downloads" element={<Downloads />} />
                     <Route path="/series" element={<Series />} />
                     <Route path="/series/:id" element={<SeriesDetail />} />
@@ -79,6 +86,7 @@ const App = () => (
                     <Route path="/profile" element={<Profile />} />
                     <Route element={<AdminRouteGuard />}>
                       <Route path="/admin" element={<Admin />} />
+                      <Route path="/admin/issues" element={<AdminIssues />} />
                       <Route path="/admin/users" element={<Users />} />
                       <Route path="/settings" element={<Settings />} />
                     </Route>

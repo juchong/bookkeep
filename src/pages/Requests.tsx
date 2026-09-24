@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Clock, CheckCircle, XCircle, Loader2, Trash2, CheckCircle2, Library, Inbox, Search, RotateCw } from 'lucide-react';
+import { Clock, CheckCircle, XCircle, Loader2, Trash2, CheckCircle2, Library, Inbox, Search, RotateCw, Flag } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,6 +11,7 @@ import { Link } from 'react-router-dom';
 import { useUser } from '@/contexts/UserContext';
 import type { BookRequest } from '@/types/book';
 import { AutomationControls } from '@/components/requests/AutomationControls';
+import { ReportIssueDialog } from '@/components/issues/ReportIssueDialog';
 
 const PAGE_SIZE = 50;
 
@@ -96,6 +97,7 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
   const status = statusConfig[request.status] ?? statusConfig.requested;
   const StatusIcon = status.icon;
   const isProcessing = request.status === 'processing';
+  const [reportOpen, setReportOpen] = useState(false);
 
   const deleteMutation = useMutation({
     mutationFn: () => requestsApi.delete(Number(request.id)),
@@ -258,6 +260,9 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
 
           {/* Action buttons */}
           <div className="flex flex-col gap-2 pt-2">
+            <Button variant="outline" size="sm" onClick={() => setReportOpen(true)} className="w-full h-9 rounded-lg">
+              <Flag className="h-4 w-4 mr-2" /> Report a problem
+            </Button>
             {isProcessing && isAdmin && (
               <Button
                 size="sm"
@@ -283,6 +288,15 @@ function RequestRow({ request, index }: { request: BookRequest; index: number })
           </div>
         </div>
       </div>
+      <ReportIssueDialog
+        open={reportOpen}
+        onOpenChange={setReportOpen}
+        bookId={Number(request.book.id)}
+        bookTitle={request.book.title}
+        format={request.format}
+        requestId={Number(request.id)}
+        downloadTaskId={request.downloadTaskId || undefined}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useParams, Link, useSearchParams } from 'react-router-dom';
-import { ArrowLeft, Star, Calendar, BookOpen, Tag, Clock, Users, Headphones, Library, ExternalLink, Trash2, Search, X, Download, Globe } from 'lucide-react';
+import { ArrowLeft, Star, Calendar, BookOpen, Tag, Clock, Users, Headphones, Library, ExternalLink, Trash2, Search, X, Download, Globe, Flag } from 'lucide-react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -14,6 +14,7 @@ import { transformHardcoverBook } from '@/lib/hardcover';
 import { toast } from 'sonner';
 import { useUser } from '@/contexts/UserContext';
 import { usePageVisibility } from '@/hooks/usePageVisibility';
+import { ReportIssueDialog } from '@/components/issues/ReportIssueDialog';
 
 export default function BookDetails() {
   const { id } = useParams();
@@ -22,6 +23,7 @@ export default function BookDetails() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchFormat, setSearchFormat] = useState<'ebook' | 'audiobook'>('ebook');
   const [searchSource, setSearchSource] = useState<'prowlarr' | 'direct' | undefined>(undefined);
+  const [reportIssueOpen, setReportIssueOpen] = useState(false);
   const queryClient = useQueryClient();
   const { user, isAdmin } = useUser();
   const isVisible = usePageVisibility();
@@ -460,6 +462,17 @@ export default function BookDetails() {
                     {clearRequestsMutation.isPending ? 'Clearing...' : 'Clear Request'}
                   </Button>
                 )}
+                {dbBook?.id && (
+                  <Button
+                    size="lg"
+                    variant="ghost"
+                    onClick={() => setReportIssueOpen(true)}
+                    className="h-12 px-5 text-muted-foreground hover:text-foreground"
+                  >
+                    <Flag className="h-4 w-4 mr-2" />
+                    Report a problem
+                  </Button>
+                )}
               </div>
             </div>
           </div>
@@ -556,6 +569,13 @@ export default function BookDetails() {
           ebook: ebookAvailable,
           audiobook: audiobookAvailable,
         }}
+      />
+
+      <ReportIssueDialog
+        open={reportIssueOpen}
+        onOpenChange={setReportIssueOpen}
+        bookId={dbBook?.id}
+        bookTitle={book.title}
       />
 
       {searchOpen && (

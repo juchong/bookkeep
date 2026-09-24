@@ -57,7 +57,17 @@ Once the server is running, you can access:
 - `PUT /api/books/{book_id}` - Update a book
 - `DELETE /api/books/{book_id}` - Delete a book
 
+### Media Issues
+- `POST /api/media-issues/` - Report a media problem
+- `GET /api/media-issues/` - List the current user's Open or Done reports
+- `GET /api/media-issues/{public_id}` - View an owned report
+- `PATCH /api/media-issues/{public_id}/report` - Update report details
+- `POST /api/media-issues/{public_id}/still-broken` - Return a Done issue to the repair list
+- `GET /api/admin/media-issues/` - List the administrator repair queue
+- `POST /api/admin/media-issues/{public_id}/done` - Mark an issue Done and notify reporters
+- `POST /api/admin/media-issues/{public_id}/reopen` - Reopen an issue
+- `GET /api/notifications/` - List the current user's issue notifications
+
 ## Database
 
 The backend uses PostgreSQL with SQLAlchemy ORM. Database models are defined in `app/models.py`.
-

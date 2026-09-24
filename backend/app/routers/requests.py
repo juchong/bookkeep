@@ -781,6 +781,12 @@ def get_request(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Request not found"
         )
+    if not current_user.is_admin and db_request.user_id != current_user.id:
+        # Use 404 so request IDs cannot be used to discover other users' data.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Request not found"
+        )
     
     # Convert book.genres from comma-separated string to list for response
     _normalize_book_genres(db_request.book)

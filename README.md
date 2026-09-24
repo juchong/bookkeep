@@ -11,6 +11,8 @@ Bookkeep is a self-hosted library companion for discovering books, exploring ser
 - Configurable automatic fulfillment of approved ebook and audiobook requests
 - Server-side request statistics, filtering, and fulfillment retry visibility
 - Admin tooling for users, requests, and settings
+- Media problem reporting with duplicate consolidation and Critical content flags
+- User issue tracking and in-app resolution notifications
 
 ## Screenshots
 
@@ -300,6 +302,23 @@ Default jobs:
 Notes:
 - Job state (e.g., seed refresh offset) is stored in the database.
 - If Redis is unavailable, jobs still run; caching falls back to memory.
+
+## Media Issue Reporting
+
+Authenticated users can report problems with a specific ebook or audiobook from
+book, request, and download screens. Reports cover wrong language, missing
+content, wrong releases, chapter/file organization, corrupt files, quality,
+metadata, and an Other category.
+
+Matching reports for the same media are consolidated into one administrator
+repair item while each reporter's text remains private. A report can be marked
+Critical when inappropriate, explicit, or violent content was added by mistake;
+Critical items appear first in the repair list but do not remove media
+automatically.
+
+Administrators review the repair list at **Admin → Media Issues**, fix the media,
+and mark the item Done. Every reporter receives an in-app notification and can
+return an item to the repair list with **Still a problem**.
 
 ## Search Performance Notes
 

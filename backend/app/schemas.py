@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from datetime import datetime
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 # User schemas
 class UserBase(BaseModel):
@@ -160,6 +160,67 @@ class BookRequestResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# Media issue reporting schemas
+MediaIssueType = Literal[
+    "wrong_language",
+    "incomplete",
+    "wrong_content",
+    "file_structure",
+    "unplayable",
+    "quality",
+    "metadata",
+    "other",
+]
+MediaFormat = Literal["ebook", "audiobook"]
+
+
+class MediaIssueCreate(BaseModel):
+    book_id: Optional[int] = None
+    format: Optional[MediaFormat] = None
+    issue_type: MediaIssueType
+    report_text: str = Field(min_length=5, max_length=4000)
+    request_id: Optional[int] = None
+    download_task_id: Optional[int] = None
+    page_path: Optional[str] = Field(default=None, max_length=500)
+    is_critical: bool = False
+    critical_explanation: Optional[str] = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_media_context(self):
+        if self.issue_type != "other" and (self.book_id is None or self.format is None):
+            raise ValueError("A book and format are required for this problem type")
+        if (self.book_id is None) != (self.format is None):
+            raise ValueError("Book and format must be provided together")
+        if self.is_critical and not (self.critical_explanation or "").strip():
+            raise ValueError("Explain the inappropriate or violent content")
+        return self
+
+
+class MediaIssueReportUpdate(BaseModel):
+    report_text: str = Field(min_length=5, max_length=4000)
+    is_critical: bool = False
+    critical_explanation: Optional[str] = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_critical_explanation(self):
+        if self.is_critical and not (self.critical_explanation or "").strip():
+            raise ValueError("Explain the inappropriate or violent content")
+        return self
+
+
+class MediaIssueStillBroken(BaseModel):
+    explanation: str = Field(min_length=5, max_length=2000)
+
+
+class MediaIssueDone(BaseModel):
+    note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class MediaIssueAdminUpdate(BaseModel):
+    issue_type: Optional[MediaIssueType] = None
+    is_critical: Optional[bool] = None
 
 
 class AutoDownloadSettingsUpdate(BaseModel):

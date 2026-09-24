@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Search, User, Settings, Clock, LogOut, Menu, ChevronDown } from 'lucide-react';
+import { Bell, Search, User, Settings, Clock, LogOut, Menu, ChevronDown } from 'lucide-react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -12,8 +12,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useQuery } from '@tanstack/react-query';
-import { hardcoverApi } from '@/lib/api';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { hardcoverApi, notificationsApi } from '@/lib/api';
 import { transformHardcoverBook } from '@/lib/hardcover';
 import { useUser } from '@/contexts/UserContext';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
@@ -51,6 +51,7 @@ export function Header({ onMenuClick }: HeaderProps) {
   const [showResults, setShowResults] = useState(false);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { user, isAdmin, logout } = useUser();
 
   useEffect(() => {
@@ -90,6 +91,23 @@ export function Header({ onMenuClick }: HeaderProps) {
   };
 
   const avatarGradient = user ? getAvatarGradient(user.username) : 'from-secondary to-muted';
+  const { data: unreadData } = useQuery({
+    queryKey: ['issue-notifications-unread'],
+    queryFn: notificationsApi.getUnreadCount,
+    refetchInterval: 60_000,
+  });
+  const { data: recentNotifications } = useQuery({
+    queryKey: ['issue-notifications', 'recent'],
+    queryFn: () => notificationsApi.getPage(0, 5),
+    refetchInterval: 60_000,
+  });
+  const readNotification = useMutation({
+    mutationFn: notificationsApi.markRead,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['issue-notifications'] });
+      queryClient.invalidateQueries({ queryKey: ['issue-notifications-unread'] });
+    },
+  });
 
   return (
     <header className="fixed top-0 left-0 right-0 md:left-64 z-30">
@@ -157,6 +175,46 @@ export function Header({ onMenuClick }: HeaderProps) {
         {/* Theme Switcher & User Dropdown */}
         <div className="order-2 ml-auto flex items-center gap-2 sm:order-3">
           <ThemeSwitcher />
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                className="relative flex h-10 w-10 items-center justify-center rounded-xl border border-border/50 bg-card/50 text-foreground hover:bg-card"
+                aria-label={`${unreadData?.count || 0} unread notifications`}
+              >
+                <Bell className="h-4 w-4" />
+                {(unreadData?.count || 0) > 0 && (
+                  <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-bold text-primary-foreground">
+                    {unreadData?.count}
+                  </span>
+                )}
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-80 p-2 bg-card border-border/50 rounded-xl shadow-2xl">
+              <div className="flex items-center justify-between px-2 py-2">
+                <p className="font-semibold">Issue updates</p>
+                <Link to="/inbox" className="text-xs text-primary hover:underline">View inbox</Link>
+              </div>
+              <DropdownMenuSeparator />
+              {!recentNotifications?.items.length ? (
+                <p className="px-3 py-6 text-center text-sm text-muted-foreground">No updates yet</p>
+              ) : recentNotifications.items.map((notification) => (
+                <DropdownMenuItem
+                  key={notification.id}
+                  className={`cursor-pointer rounded-lg p-3 ${!notification.read_at ? 'bg-primary/5' : ''}`}
+                  onSelect={() => {
+                    if (!notification.read_at) readNotification.mutate(notification.id);
+                    navigate(`/issues/${notification.issue.public_id}`);
+                  }}
+                >
+                  <div>
+                    <p className="text-sm font-medium leading-snug">{notification.message}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">{notification.issue.reference}</p>
+                  </div>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           {/* User Dropdown */}
           <DropdownMenu>

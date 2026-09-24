@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { usePageVisibility } from '@/hooks/usePageVisibility';
-import { Download, RefreshCw, Clock, CheckCircle, XCircle, Pause, FolderInput, Trash2, AlertCircle, Loader2, RotateCcw, ExternalLink, ScanSearch } from 'lucide-react';
+import { Download, RefreshCw, Clock, CheckCircle, XCircle, Pause, FolderInput, Trash2, AlertCircle, Loader2, RotateCcw, ExternalLink, ScanSearch, Flag } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Table,
@@ -34,6 +34,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { ReportIssueDialog } from '@/components/issues/ReportIssueDialog';
 
 interface DownloadTask {
   id: number;
@@ -218,6 +219,7 @@ export default function Downloads() {
   const { isAdmin } = useUser();
   const [filterState, setFilterState] = useState<string | undefined>(undefined);
   const [rescanPreview, setRescanPreview] = useState<DownloadRescanSummary | null>(null);
+  const [reportedTask, setReportedTask] = useState<DownloadTask | null>(null);
   const completedTasksRef = useRef<Set<number>>(getInitialCompletedTasks());
 
   const { data: tasks = [], isLoading, error, refetch } = useQuery<DownloadTask[], Error>({
@@ -720,6 +722,14 @@ export default function Downloads() {
                       <div className="flex items-center gap-2">
                         {/* Show log button for direct downloads */}
                         <DownloadLogPanel taskId={task.id} protocol={task.protocol} />
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setReportedTask(task)}
+                          title="Report a problem with this media"
+                        >
+                          <Flag className="h-4 w-4" />
+                        </Button>
                         {/* Retry button for failed downloads */}
                         {task.state === 'error' && (
                           <TooltipProvider>
@@ -793,6 +803,14 @@ export default function Downloads() {
           </TableBody>
         </Table>
       </div>
+      <ReportIssueDialog
+        open={Boolean(reportedTask)}
+        onOpenChange={(open) => { if (!open) setReportedTask(null); }}
+        bookId={reportedTask?.book_id}
+        bookTitle={reportedTask?.release_title}
+        format={reportedTask?.format as 'ebook' | 'audiobook' | undefined}
+        downloadTaskId={reportedTask?.id}
+      />
     </div>
   );
 }

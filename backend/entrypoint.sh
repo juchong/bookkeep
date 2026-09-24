@@ -59,15 +59,47 @@ except Exception:
 " 2>/dev/null || echo "no")
 
         if [ "$OIDC_COL" = "yes" ]; then
-            # Schema is fully up to date; stamp as head so no migrations run.
-            echo "Schema is current. Stamping database as head..."
-            python -m alembic -c alembic.ini stamp heads
+            # This legacy schema was current before media issue reporting. If
+            # the new table is already present it can be stamped at head;
+            # otherwise stamp 040 so migration 041 is still applied.
+            MEDIA_ISSUES_TABLE=$(python -c "
+import sys, os
+sys.path.insert(0, '/app/backend')
+from sqlalchemy import inspect, create_engine
+engine = create_engine(os.environ['DATABASE_URL'])
+try:
+    print('yes' if inspect(engine).has_table('media_issues') else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null || echo "no")
+            if [ "$MEDIA_ISSUES_TABLE" = "yes" ]; then
+                echo "Schema is current. Stamping database as head..."
+                python -m alembic -c alembic.ini stamp heads
+            else
+                echo "Legacy schema predates media issues. Stamping at revision 040..."
+                python -m alembic -c alembic.ini stamp 040
+            fi
         else
             # Schema is behind (oidc_subject missing). Stamp at 034 so Alembic
             # runs 035 and 036 to bring the schema up to date.
             echo "Legacy database missing recent columns. Stamping at revision 034..."
             python -m alembic -c alembic.ini stamp 034
         fi
+    else
+        # The historical migration chain starts by altering tables created by
+        # the application and cannot bootstrap a completely empty database.
+        # Create the current schema once, then mark it current. Future changes
+        # continue through normal Alembic upgrades.
+        echo "Empty database detected. Creating the current schema..."
+        python -c "
+import sys
+sys.path.insert(0, '/app/backend')
+from app.database import Base, engine
+import app.models
+Base.metadata.create_all(bind=engine)
+"
+        echo "Initial schema created. Stamping database as head..."
+        python -m alembic -c alembic.ini stamp heads
     fi
 fi
 
